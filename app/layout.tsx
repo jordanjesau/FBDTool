@@ -4,7 +4,7 @@ import "./globals.css";
 
 export const metadata: Metadata = {
   title: "FBD Equation Whiteboard",
-  description: "A pencil-friendly free body diagram and equation-solving workspace.",
+  description: "A free iPad-friendly free body diagram and equation-solving workspace with on-device Apple Pencil Scribble input.",
   applicationName: "FBD Equation Whiteboard",
   appleWebApp: {
     capable: true,

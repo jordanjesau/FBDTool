@@ -1,11 +1,10 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState, type MutableRefObject, type PointerEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent } from "react";
 import { extractVariables, LinearEquation, MathInputError, parseEquations, solveSystem, SolveResult } from "../lib/math";
 
 type Point = { x: number; y: number; pressure: number };
 type Stroke = Point[];
-type PadHandle = { image: () => string | null };
 type Tab = "sketch" | "equations";
 type Sample = { driver: number; response: number };
 
@@ -109,108 +108,6 @@ function DrawingPad({ label, className = "" }: { label: string; className?: stri
   );
 }
 
-function EquationPad({ imageRef, className = "" }: { imageRef: MutableRefObject<PadHandle | null>; className?: string }) {
-  const canvasRef = useRef<HTMLCanvasElement>(null);
-  const strokesRef = useRef<Stroke[]>([]);
-  const activeStrokeRef = useRef<Stroke | null>(null);
-  const [hasMarks, setHasMarks] = useState(false);
-  const redraw = useCallback(() => {
-    const canvas = canvasRef.current;
-    const context = canvas?.getContext("2d");
-    if (!canvas || !context) return;
-    context.clearRect(0, 0, canvas.width, canvas.height);
-    context.strokeStyle = "#172b4d";
-    context.lineCap = "round";
-    context.lineJoin = "round";
-    for (const stroke of [...strokesRef.current, ...(activeStrokeRef.current ? [activeStrokeRef.current] : [])]) {
-      if (stroke.length === 0) continue;
-      context.beginPath();
-      context.moveTo(stroke[0].x * canvas.width, stroke[0].y * canvas.height);
-      for (const point of stroke.slice(1)) {
-        context.lineWidth = Math.max(1.5, point.pressure * 3.2) * (window.devicePixelRatio || 1);
-        context.lineTo(point.x * canvas.width, point.y * canvas.height);
-      }
-      context.stroke();
-    }
-  }, []);
-
-  useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    const resize = () => {
-      const rect = canvas.getBoundingClientRect();
-      if (!rect.width || !rect.height) return;
-      const ratio = Math.min(window.devicePixelRatio || 1, 2);
-      canvas.width = Math.round(rect.width * ratio);
-      canvas.height = Math.round(rect.height * ratio);
-      redraw();
-    };
-    const observer = new ResizeObserver(resize);
-    observer.observe(canvas);
-    resize();
-    return () => observer.disconnect();
-  }, [redraw]);
-
-  const clear = () => {
-    strokesRef.current = [];
-    activeStrokeRef.current = null;
-    setHasMarks(false);
-    redraw();
-  };
-  const image = () => canvasRef.current?.toDataURL("image/png") ?? null;
-  useEffect(() => {
-    imageRef.current = { image };
-    return () => { imageRef.current = null; };
-  }, [imageRef]);
-  const pointFromEvent = (event: PointerEvent<HTMLCanvasElement>) => {
-    const rect = event.currentTarget.getBoundingClientRect();
-    return {
-      x: Math.max(0, Math.min(1, (event.clientX - rect.left) / rect.width)),
-      y: Math.max(0, Math.min(1, (event.clientY - rect.top) / rect.height)),
-      pressure: event.pressure || 0.5,
-    };
-  };
-
-  return (
-    <div className={`pad-shell equation-pad ${className}`} data-equation-pad>
-      <canvas
-        ref={canvasRef}
-        aria-label="Equation handwriting recognition pad"
-        className="drawing-canvas"
-        onPointerDown={(event) => {
-          event.preventDefault();
-          event.currentTarget.setPointerCapture(event.pointerId);
-          activeStrokeRef.current = [pointFromEvent(event)];
-          redraw();
-        }}
-        onPointerMove={(event) => {
-          if (!activeStrokeRef.current) return;
-          event.preventDefault();
-          activeStrokeRef.current.push(pointFromEvent(event));
-          redraw();
-        }}
-        onPointerUp={() => {
-          if (!activeStrokeRef.current) return;
-          strokesRef.current = [...strokesRef.current, activeStrokeRef.current];
-          activeStrokeRef.current = null;
-          setHasMarks(true);
-          redraw();
-        }}
-        onPointerCancel={() => {
-          if (activeStrokeRef.current) {
-            strokesRef.current = [...strokesRef.current, activeStrokeRef.current];
-            activeStrokeRef.current = null;
-            setHasMarks(true);
-            redraw();
-          }
-        }}
-      />
-      {!hasMarks && <div className="pad-placeholder" aria-hidden="true">Write an equation here with Apple Pencil</div>}
-      <button className="pad-clear" onClick={clear} type="button">Clear</button>
-    </div>
-  );
-}
-
 function formatNumber(value: number): string {
   return new Intl.NumberFormat(undefined, { maximumSignificantDigits: 7 }).format(value);
 }
@@ -292,12 +189,8 @@ function ResponsePlot({ samples, driver, response }: { samples: Sample[]; driver
 }
 
 export default function Home() {
-  const equationPad = useRef<PadHandle | null>(null);
   const [tab, setTab] = useState<Tab>("sketch");
   const [equationText, setEquationText] = useState("");
-  const [consent, setConsent] = useState(false);
-  const [recognizing, setRecognizing] = useState(false);
-  const [recognitionMessage, setRecognitionMessage] = useState("");
   const [known, setKnown] = useState<Record<string, boolean>>({});
   const [knownValues, setKnownValues] = useState<Record<string, string>>({});
   const [result, setResult] = useState<SolveResult | null>(null);
@@ -343,49 +236,6 @@ export default function Home() {
     return values;
   }, [known, knownValues, variables]);
   const enoughEquations = parsed.equations.length >= unknowns.length;
-
-  const recognize = async () => {
-    if (!consent) {
-      setRecognitionMessage("Confirm the upload disclosure before sending equation handwriting.");
-      return;
-    }
-    const image = equationPad.current?.image();
-    if (!image) {
-      setRecognitionMessage("The equation pad is not ready yet. Try again.");
-      return;
-    }
-    setRecognizing(true);
-    setRecognitionMessage("");
-    try {
-      const response = await fetch("/api/recognize", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ image, consent: true }),
-      });
-      const data: unknown = await response.json();
-      if (!response.ok) {
-        const message = typeof data === "object" && data !== null && "error" in data && typeof data.error === "string"
-          ? data.error
-          : `Recognition request failed (HTTP ${response.status}).`;
-        throw new Error(message);
-      }
-      if (typeof data !== "object" || data === null || !("text" in data) || typeof data.text !== "string" || !data.text.trim()) {
-        throw new Error("Recognition returned no equation text.");
-      }
-      setEquationText(data.text.replace(/\r/g, "").trim());
-      setKnown({});
-      setKnownValues({});
-      setResult(null);
-      setSamples(null);
-      setSolveMessage("");
-      setSweepMessage("");
-      setRecognitionMessage("Recognition complete. Review and correct the equations below before solving.");
-    } catch (error) {
-      setRecognitionMessage(error instanceof Error ? error.message : "Equation recognition failed. Please try again.");
-    } finally {
-      setRecognizing(false);
-    }
-  };
 
   const solve = () => {
     setResult(null);
@@ -486,7 +336,7 @@ export default function Home() {
             </div>
             <span className="local-badge">LOCAL ONLY</span>
           </div>
-          <p className="card-description">Draw forces, supports, dimensions, and notes. This canvas is separate from equation recognition and is never uploaded.</p>
+          <p className="card-description">Draw forces, supports, dimensions, and notes. Your sketch stays in this browser and is never uploaded.</p>
           <DrawingPad label="Free body diagram sketch pad" />
           <div className="canvas-footer">
             <span>Apple Pencil · touch · mouse</span>
@@ -496,7 +346,7 @@ export default function Home() {
         <aside className="side-note">
           <div className="note-icon">✳</div>
           <h3>Keep the picture separate.</h3>
-          <p>Your diagram is a thinking space—not OCR input. Switch to equations when you’re ready to capture the math.</p>
+          <p>Your diagram is a local drawing surface, separate from the equation editor. Switch tabs when you’re ready to enter the math.</p>
           <button className="primary-button" onClick={() => setTab("equations")} type="button">Continue to equations <span>→</span></button>
           <div className="note-divider" />
           <p className="small-note"><strong>Good to know</strong><br />Lines, arrows, and labels on this sketch will never leave this device.</p>
@@ -504,43 +354,25 @@ export default function Home() {
       </div>
 
       <div className={tab === "equations" ? "workspace-panel equation-layout" : "workspace-panel equation-layout is-hidden"} aria-hidden={tab !== "equations"} inert={tab !== "equations"}>
-        <section className="canvas-card equation-capture-card">
-          <div className="card-heading">
-            <div>
-              <h2>Capture your equations</h2>
-            </div>
-            <span className="cloud-badge">CLOUD OCR</span>
-          </div>
-          <p className="card-description">Write equations only. Handwriting recognition sends this pad image to Mathpix; nothing from the free body diagram is included.</p>
-          <EquationPad imageRef={equationPad} />
-          <label className="consent-row">
-            <input type="checkbox" checked={consent} onChange={(event) => setConsent(event.target.checked)} />
-            <span>I understand the equation handwriting above will be sent to Mathpix for recognition.</span>
-          </label>
-          <div className="capture-actions">
-            <button className="primary-button" disabled={recognizing || !consent} onClick={recognize} type="button">
-              {recognizing ? <><span className="spinner" /> Recognizing…</> : <>Recognize handwriting <span>↗</span></>}
-            </button>
-            <span className="provider-label">Mathpix handwriting OCR</span>
-          </div>
-          {recognitionMessage && <p className={recognitionMessage.includes("complete") ? "inline-message success" : "inline-message error"} role="status">{recognitionMessage}</p>}
-        </section>
-
         <section className="canvas-card equation-editor-card">
           <div className="card-heading">
             <div>
-              <h2>Check the math</h2>
+              <h2>Write your equations</h2>
             </div>
             {variables.length > 0 && <span className="variable-count">{variables.length} variables</span>}
           </div>
-          <p className="card-description">Correct the recognized text or type equations directly. Use one equation per line; multiplication may be explicit (x*y) or implicit (2x).</p>
-          <label className="field-label" htmlFor="equations">Equations <span>editable</span></label>
+          <p className="card-description">Type equations or use Apple Pencil Scribble in the field below. Scribble turns handwriting into editable text on your iPad; this app doesn’t upload your writing or need an OCR subscription.</p>
+          <p className="scribble-tip"><strong>iPad tip:</strong> Enable Scribble under Settings → Apple Pencil → Scribble, tap the equation field, and write. Check the converted symbols and use one equation per line.</p>
+          <label className="field-label" htmlFor="equations">Equations <span>on-device entry</span></label>
           <textarea
             id="equations"
             className="equation-editor"
             value={equationText}
             onChange={(event) => updateEquations(event.target.value)}
             placeholder={"Fx = 0\nF = m*a"}
+            inputMode="text"
+            autoCapitalize="off"
+            autoCorrect="off"
             spellCheck={false}
           />
           {parsed.error && <p className="inline-message error" role="alert">{parsed.error}</p>}

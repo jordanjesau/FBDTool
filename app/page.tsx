@@ -5,7 +5,6 @@ import { extractVariables, LinearEquation, MathInputError, parseEquations, solve
 
 type Point = { x: number; y: number; pressure: number };
 type Stroke = Point[];
-type Tab = "sketch" | "equations";
 type Sample = { driver: number; response: number };
 
 function DrawingPad({ label, className = "" }: { label: string; className?: string }) {
@@ -68,6 +67,11 @@ function DrawingPad({ label, className = "" }: { label: string; className?: stri
     redraw();
   };
 
+  useEffect(() => {
+    window.addEventListener("clear-sketch", clear);
+    return () => window.removeEventListener("clear-sketch", clear);
+  }, [redraw]);
+
   return (
     <div className={`pad-shell ${className}`}>
       <canvas
@@ -103,7 +107,6 @@ function DrawingPad({ label, className = "" }: { label: string; className?: stri
         }}
       />
       {!hasMarks && <div className="pad-placeholder" aria-hidden="true">Write or draw here with Apple Pencil</div>}
-      <button className="pad-clear" onClick={clear} type="button">Clear</button>
     </div>
   );
 }
@@ -189,7 +192,6 @@ function ResponsePlot({ samples, driver, response }: { samples: Sample[]; driver
 }
 
 export default function Home() {
-  const [tab, setTab] = useState<Tab>("sketch");
   const [equationText, setEquationText] = useState("");
   const [known, setKnown] = useState<Record<string, boolean>>({});
   const [knownValues, setKnownValues] = useState<Record<string, string>>({});
@@ -295,75 +297,41 @@ export default function Home() {
   };
 
   return (
-    <main className="app-shell">
-      <header className="topbar">
-        <a className="brand" href="/" aria-label="FBD Equation Whiteboard home">
+    <main className="whiteboard">
+      <header className="board-toolbar">
+        <a className="brand" href="/" aria-label="FBD Whiteboard">
           <span className="brand-mark">F</span>
           <span>FBD <strong>Whiteboard</strong></span>
         </a>
-        <div className="topbar-right">
-          <span className="privacy-pill"><span /> Sketch stays on this device</span>
-          <a className="help-link" href="#help">Help</a>
+        <div className="toolbar-actions">
+          <span className="local-indicator"><span /> Local</span>
+          <details className="help-menu">
+            <summary aria-label="Help" title="Help">?</summary>
+            <div className="help-popover">
+              <strong>Apple Pencil</strong>
+              <p>Turn on Scribble in Settings → Apple Pencil. Write one equation per line, then check the text.</p>
+            </div>
+          </details>
         </div>
       </header>
 
-      <section className="intro">
-        <div>
-          <h1>Think it through.<br className="mobile-break" /> Solve it clearly.</h1>
-          <p className="intro-copy">Sketch your free body diagram, then work through the equations—kept in their own space.</p>
-        </div>
-        <div className="workflow-note"><span>01</span> Sketch <i>→</i> <span>02</span> Equations <i>→</i> <span>03</span> Solve</div>
-      </section>
       {pwaMessage && <p className="pwa-warning" role="status">{pwaMessage}</p>}
 
-      <nav className="workspace-tabs" aria-label="Workspace">
-        <button className={tab === "sketch" ? "tab active" : "tab"} onClick={() => setTab("sketch")} type="button">
-          <span className="tab-number">01</span> Free body diagram
-        </button>
-        <button className={tab === "equations" ? "tab active" : "tab"} onClick={() => setTab("equations")} type="button">
-          <span className="tab-number">02</span> Equations &amp; solve
-          {variables.length > 0 && <span className="tab-count">{variables.length}</span>}
-        </button>
-        <span className="tab-spacer" />
-        <span className="pencil-indicator"><span /> Pencil ready</span>
-      </nav>
-
-      <div className={tab === "sketch" ? "workspace-panel" : "workspace-panel is-hidden"} aria-hidden={tab !== "sketch"} inert={tab !== "sketch"}>
-        <section className="canvas-card sketch-card">
-          <div className="card-heading">
-            <div>
-              <h2>Free body diagram</h2>
-            </div>
-            <span className="local-badge">LOCAL ONLY</span>
+      <div className="board-split">
+        <section className="board-pane sketch-pane" aria-label="Free body diagram">
+          <div className="pane-toolbar">
+            <h1>Diagram</h1>
+            <button className="quiet-button" type="button" onClick={() => window.dispatchEvent(new Event("clear-sketch"))}>Clear</button>
           </div>
-          <p className="card-description">Draw forces, supports, dimensions, and notes. Your sketch stays in this browser and is never uploaded.</p>
           <DrawingPad label="Free body diagram sketch pad" />
-          <div className="canvas-footer">
-            <span>Apple Pencil · touch · mouse</span>
-            <span>Sketch data stays in this browser session</span>
-          </div>
         </section>
-        <aside className="side-note">
-          <div className="note-icon">✳</div>
-          <h3>Keep the picture separate.</h3>
-          <p>Your diagram is a local drawing surface, separate from the equation editor. Switch tabs when you’re ready to enter the math.</p>
-          <button className="primary-button" onClick={() => setTab("equations")} type="button">Continue to equations <span>→</span></button>
-          <div className="note-divider" />
-          <p className="small-note"><strong>Good to know</strong><br />Lines, arrows, and labels on this sketch will never leave this device.</p>
-        </aside>
-      </div>
 
-      <div className={tab === "equations" ? "workspace-panel equation-layout" : "workspace-panel equation-layout is-hidden"} aria-hidden={tab !== "equations"} inert={tab !== "equations"}>
-        <section className="canvas-card equation-editor-card">
-          <div className="card-heading">
-            <div>
-              <h2>Write your equations</h2>
-            </div>
-            {variables.length > 0 && <span className="variable-count">{variables.length} variables</span>}
+        <section className="board-pane math-pane" aria-label="Equations and solution">
+          <div className="pane-toolbar">
+            <h2>Equations</h2>
+            <span className="equation-count">{parsed.equations.length} eq · {unknowns.length} unknown</span>
           </div>
-          <p className="card-description">Type equations or use Apple Pencil Scribble in the field below. Scribble turns handwriting into editable text on your iPad; this app doesn’t upload your writing or need an OCR subscription.</p>
-          <p className="scribble-tip"><strong>iPad tip:</strong> Enable Scribble under Settings → Apple Pencil → Scribble, tap the equation field, and write. Check the converted symbols and use one equation per line.</p>
-          <label className="field-label" htmlFor="equations">Equations <span>on-device entry</span></label>
+          <label className="sr-only" htmlFor="equations">Equations, one per line</label>
           <textarea
             id="equations"
             className="equation-editor"
@@ -375,139 +343,129 @@ export default function Home() {
             autoCorrect="off"
             spellCheck={false}
           />
-          {parsed.error && <p className="inline-message error" role="alert">{parsed.error}</p>}
-          {parsed.equations.length > 0 && !parsed.error && (
-            <div className="equation-preview" aria-label="Equation variable highlighting">
-              <div className="preview-title">VARIABLE HIGHLIGHTS <span><i className="known-key" /> Known <i className="unknown-key" /> Unknown</span></div>
-              {parsed.equations.map((equation, index) => (
-                <div className="preview-equation" key={`${index}-${equation.source}`}>
-                  <span className="equation-index">{index + 1}</span>
-                  <HighlightedEquation equation={equation.source} variables={variables} known={known} />
-                </div>
-              ))}
-            </div>
-          )}
 
-          {variables.length > 0 && !parsed.error && (
-            <div className="variable-section">
-              <div className="subsection-heading">
-                <div><h3>Variables</h3><p>Mark measured or specified values as known.</p></div>
-                <span>{unknowns.length} unknown · {parsed.equations.length} equations</span>
-              </div>
-              <div className="variable-list">
-                {variables.map((name) => (
-                  <div className={`variable-row ${known[name] ? "known-row" : ""}`} key={name}>
-                    <span className={`variable-symbol ${known[name] ? "known-text" : "unknown-text"}`}>{name}</span>
-                    <span className={`variable-status ${known[name] ? "known-status" : "unknown-status"}`}>{known[name] ? "KNOWN" : "UNKNOWN"}</span>
-                    {known[name] ? (
-                      <label className="known-input-wrap">
-                        <span className="sr-only">{name} known value</span>
-                        <input
-                          inputMode="decimal"
-                          value={knownValues[name] ?? ""}
-                          onChange={(event) => {
-                            setKnownValues((previous) => ({ ...previous, [name]: event.target.value }));
-                            setResult(null);
-                            setSamples(null);
-                            setSolveMessage("");
-                            setSweepMessage("");
-                          }}
-                          placeholder="value"
-                        />
-                      </label>
-                    ) : <span className="variable-inferred">Solve for this</span>}
-                    <button
-                      className="known-toggle"
-                      type="button"
-                      aria-label={known[name] ? `Mark ${name} unknown` : `Mark ${name} known`}
-                      aria-pressed={!!known[name]}
-                      onClick={() => {
-                        setKnown((previous) => ({ ...previous, [name]: !previous[name] }));
-                        setResult(null);
-                        setSamples(null);
-                        setSolveMessage("");
-                        setSweepMessage("");
-                      }}
-                    >{known[name] ? "Known ✓" : "Set known"}</button>
+          <div className="math-scroll">
+            {parsed.error && <p className="inline-message error" role="alert">{parsed.error}</p>}
+            {parsed.equations.length > 0 && !parsed.error && (
+              <div className="equation-preview" aria-label="Equation variable highlighting">
+                <div className="preview-title"><span><i className="known-key" /> Known <i className="unknown-key" /> Unknown</span></div>
+                {parsed.equations.map((equation, index) => (
+                  <div className="preview-equation" key={`${index}-${equation.source}`}>
+                    <span className="equation-index">{index + 1}</span>
+                    <HighlightedEquation equation={equation.source} variables={variables} known={known} />
                   </div>
                 ))}
               </div>
-              {!enoughEquations && (
-                <p className="inline-message warning" role="status">
-                  System check: {parsed.equations.length} equation(s), {unknowns.length} unknown(s). At least as many independent equations as unknowns are required.
-                </p>
-              )}
-              {knownNumericValues === null && <p className="inline-message warning">Enter a finite numeric value for each known variable to solve.</p>}
-              <button className="solve-button" onClick={solve} disabled={!enoughEquations || !!parsed.error || knownNumericValues === null} type="button">
-                Solve system <span>→</span>
-              </button>
-              {solveMessage && <p className="inline-message error" role="alert">{solveMessage}</p>}
-              {result?.ok && (
-                <div className="result-card" role="status">
-                  <div className="result-heading"><span className="result-check">✓</span><div><strong>System solved</strong><small>Linear solution</small></div></div>
-                  <div className="result-values">
-                    {variables.map((name) => {
-                      const value = known[name] ? knownNumericValues?.[name] : result.values[name];
-                      return <div className="result-value" key={name}><span>{name}</span><strong>{value === undefined ? "—" : formatNumber(value)}</strong></div>;
-                    })}
-                  </div>
-                </div>
-              )}
-            </div>
-          )}
-        </section>
+            )}
 
-        <section className="canvas-card sweep-card">
-          <div className="card-heading">
-            <div>
-              <h2>Parameter sweep</h2>
-            </div>
-            <span className="local-badge">LOCAL SOLVE</span>
-          </div>
-          <p className="card-description">Vary one unknown across a range. The other unknowns are re-solved at each point.</p>
-          {unknowns.length < 2 || parsed.error || !parsed.equations.length ? (
-            <div className="empty-sweep">Add valid equations with at least two unknowns to explore a response.</div>
-          ) : (
-            <>
-              <div className="sweep-controls">
-                <label>Driving variable
-                  <select value={currentDriver} onChange={(event) => { setDriver(event.target.value); setSamples(null); }}>
-                    {unknowns.map((name) => <option key={name} value={name}>{name}</option>)}
-                  </select>
-                </label>
-                <label>Driven variable
-                  <select value={currentResponse} onChange={(event) => { setResponse(event.target.value); setSamples(null); }}>
-                    {unknowns.filter((name) => name !== currentDriver).map((name) => <option key={name} value={name}>{name}</option>)}
-                  </select>
-                </label>
-              </div>
-              <div className="range-controls">
-                <label>From <input inputMode="decimal" value={rangeStart} onChange={(event) => { setRangeStart(event.target.value); setSamples(null); setSweepMessage(""); }} /></label>
-                <label>To <input inputMode="decimal" value={rangeEnd} onChange={(event) => { setRangeEnd(event.target.value); setSamples(null); setSweepMessage(""); }} /></label>
-                <label>Samples <input inputMode="numeric" type="number" min="2" max="101" value={sampleCount} onChange={(event) => { setSampleCount(event.target.value); setSamples(null); setSweepMessage(""); }} /></label>
-              </div>
-              <button className="secondary-button" onClick={runSweep} type="button">Generate table &amp; plot <span>↗</span></button>
-              {sweepMessage && <p className="inline-message error" role="alert">{sweepMessage}</p>}
-              {samples && (
-                <div className="sweep-results" aria-live="polite">
-                  <ResponsePlot samples={samples} driver={currentDriver} response={currentResponse} />
-                  <div className="sample-table-wrap">
-                    <table>
-                      <thead><tr><th>{currentDriver}</th><th>{currentResponse}</th></tr></thead>
-                      <tbody>{samples.map((sample, index) => <tr key={`${index}-${sample.driver}`}><td>{formatNumber(sample.driver)}</td><td>{formatNumber(sample.response)}</td></tr>)}</tbody>
-                    </table>
-                  </div>
+            {variables.length > 0 && !parsed.error && (
+              <div className="variable-section">
+                <div className="subsection-heading">
+                  <h3>Variables</h3>
+                  {!enoughEquations && <span className="system-warning">{parsed.equations.length} eq · {unknowns.length} unknown</span>}
                 </div>
-              )}
-            </>
+                <div className="variable-list">
+                  {variables.map((name) => (
+                    <div className={`variable-row ${known[name] ? "known-row" : ""}`} key={name}>
+                      <span className={`variable-symbol ${known[name] ? "known-text" : "unknown-text"}`}>{name}</span>
+                      {known[name] ? (
+                        <label className="known-input-wrap">
+                          <span className="sr-only">{name} known value</span>
+                          <input
+                            inputMode="decimal"
+                            value={knownValues[name] ?? ""}
+                            onChange={(event) => {
+                              setKnownValues((previous) => ({ ...previous, [name]: event.target.value }));
+                              setResult(null);
+                              setSamples(null);
+                              setSolveMessage("");
+                              setSweepMessage("");
+                            }}
+                            placeholder="Value"
+                          />
+                        </label>
+                      ) : <span className="variable-inferred">Unknown</span>}
+                      <button
+                        className="known-toggle"
+                        type="button"
+                        aria-label={known[name] ? `Mark ${name} unknown` : `Mark ${name} known`}
+                        aria-pressed={!!known[name]}
+                        onClick={() => {
+                          setKnown((previous) => ({ ...previous, [name]: !previous[name] }));
+                          setResult(null);
+                          setSamples(null);
+                          setSolveMessage("");
+                          setSweepMessage("");
+                        }}
+                      >{known[name] ? "Known ✓" : "Set known"}</button>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {solveMessage && <p className="inline-message error" role="alert">{solveMessage}</p>}
+            {result?.ok && (
+              <div className="result-card" role="status">
+                <div className="result-heading"><span className="result-check">✓</span><strong>Solved</strong></div>
+                <div className="result-values">
+                  {variables.map((name) => {
+                    const value = known[name] ? knownNumericValues?.[name] : result.values[name];
+                    return <div className="result-value" key={name}><span className={known[name] ? "known-text" : "unknown-text"}>{name}</span><strong>{value === undefined ? "—" : formatNumber(value)}</strong></div>;
+                  })}
+                </div>
+              </div>
+            )}
+          </div>
+
+          {variables.length > 0 && (
+            <div className="math-actions">
+              <details className="sweep-tools">
+                <summary>Parameter sweep</summary>
+                <div className="sweep-body">
+                {unknowns.length < 2 || parsed.error || !parsed.equations.length ? (
+                  <p className="sweep-note">Add two unknowns.</p>
+                ) : (
+                  <>
+                    <div className="sweep-controls">
+                      <label>Drive
+                        <select value={currentDriver} onChange={(event) => { setDriver(event.target.value); setSamples(null); }}>
+                          {unknowns.map((name) => <option key={name} value={name}>{name}</option>)}
+                        </select>
+                      </label>
+                      <label>Response
+                        <select value={currentResponse} onChange={(event) => { setResponse(event.target.value); setSamples(null); }}>
+                          {unknowns.filter((name) => name !== currentDriver).map((name) => <option key={name} value={name}>{name}</option>)}
+                        </select>
+                      </label>
+                    </div>
+                    <div className="range-controls">
+                      <label>From <input inputMode="decimal" aria-label="Range start" value={rangeStart} onChange={(event) => { setRangeStart(event.target.value); setSamples(null); setSweepMessage(""); }} /></label>
+                      <label>To <input inputMode="decimal" aria-label="Range end" value={rangeEnd} onChange={(event) => { setRangeEnd(event.target.value); setSamples(null); setSweepMessage(""); }} /></label>
+                      <label>Points <input inputMode="numeric" type="number" min="2" max="101" aria-label="Sample count" value={sampleCount} onChange={(event) => { setSampleCount(event.target.value); setSamples(null); setSweepMessage(""); }} /></label>
+                    </div>
+                    <button className="secondary-button" onClick={runSweep} type="button">Plot range</button>
+                    {sweepMessage && <p className="inline-message error" role="alert">{sweepMessage}</p>}
+                    {samples && (
+                      <div className="sweep-results" aria-live="polite">
+                        <ResponsePlot samples={samples} driver={currentDriver} response={currentResponse} />
+                        <div className="sample-table-wrap">
+                          <table>
+                            <thead><tr><th>{currentDriver}</th><th>{currentResponse}</th></tr></thead>
+                            <tbody>{samples.map((sample, index) => <tr key={`${index}-${sample.driver}`}><td>{formatNumber(sample.driver)}</td><td>{formatNumber(sample.response)}</td></tr>)}</tbody>
+                          </table>
+                        </div>
+                      </div>
+                    )}
+                  </>
+                )}
+                </div>
+              </details>
+              <button className="solve-button" onClick={solve} disabled={!enoughEquations || !!parsed.error || knownNumericValues === null} type="button">Solve</button>
+            </div>
           )}
         </section>
       </div>
-
-      <footer id="help" className="footer">
-        <span>FBD Whiteboard <span className="footer-dot">·</span> Built for mechanical reasoning</span>
-        <span>Linear systems only <span className="footer-dot">·</span> Nonlinear equations are flagged, never guessed</span>
-      </footer>
     </main>
   );
 }

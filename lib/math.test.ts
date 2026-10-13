@@ -1,0 +1,53 @@
+import { describe, expect, it } from "vitest";
+import { extractVariables, MathInputError, parseEquation, parseEquations, solveSystem } from "./math";
+
+describe("equation parsing", () => {
+  it("parses explicit and implicit multiplication and collects consistent variables", () => {
+    const equations = parseEquations("F = 2a\nF - 3*x = 0\nx-x=0");
+    expect(extractVariables(equations)).toEqual(["F", "a", "x"]);
+    expect(equations[0]).toMatchObject({ coefficients: { F: 1, a: -2 }, constant: 0 });
+    expect(equations[2].coefficients).toHaveProperty("x", 0);
+  });
+
+  it("reduces both sides into a linear equation", () => {
+    expect(parseEquation("2 * (x + 3) = 10")).toMatchObject({
+      coefficients: { x: 2 },
+      constant: -4,
+    });
+  });
+
+  it.each(["x*y = 2", "x^2 = 4", "x / y = 1", "x == 1"])("rejects unsupported or malformed equation %s", (input) => {
+    expect(() => parseEquation(input)).toThrow(MathInputError);
+  });
+
+  it("reports the source line for invalid equation input", () => {
+    expect(() => parseEquations("x=2\ny^2=4")).toThrow("Equation 2:");
+  });
+});
+
+describe("linear-system solving", () => {
+  it("solves a square system with known values substituted", () => {
+    const equations = parseEquations("x + y = 10\n2*x - y = 2");
+    expect(solveSystem(equations, ["x", "y"])).toEqual({ ok: true, values: { y: 6, x: 4 } });
+  });
+
+  it("rejects non-square, contradictory, underdetermined, and ill-conditioned systems", () => {
+    expect(solveSystem(parseEquations("x+y=1"), ["x", "y"])).toMatchObject({ ok: false, reason: "non-square" });
+    expect(solveSystem(parseEquations("x=1\nx=2"), ["x", "y"])).toMatchObject({ ok: false, reason: "inconsistent" });
+    expect(solveSystem(parseEquations("x+y=1\n2*x+2*y=2"), ["x", "y"])).toMatchObject({ ok: false, reason: "non-unique" });
+    expect(solveSystem(parseEquations("x+y=2\nx+1.000000000001*y=2.000000000001"), ["x", "y"]))
+      .toMatchObject({ ok: false, reason: "ill-conditioned" });
+  });
+
+  it("substitutes editable known values", () => {
+    const equations = parseEquations("x + y = 8\nx - y = 2");
+    expect(solveSystem(equations, ["x"], { y: 3 })).toEqual({ ok: true, values: { x: 5 } });
+  });
+
+  it("scales equations before solving and checks extra equations for consistency", () => {
+    expect(solveSystem(parseEquations("1000000000000*x + 1000000000000*y = 3000000000000\nx-y=1"), ["x", "y"]))
+      .toEqual({ ok: true, values: { y: 1, x: 2 } });
+    expect(solveSystem(parseEquations("x+y=4\nx+y=5"), ["x"], { y: 1 }))
+      .toMatchObject({ ok: false, reason: "inconsistent" });
+  });
+});

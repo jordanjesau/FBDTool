@@ -2,7 +2,7 @@
   "id": "/",
   "name": "FBD Equation Whiteboard",
   "short_name": "FBD Whiteboard",
-  "description": "A pencil-friendly free body diagram and equation-solving workspace.",
+  "description": "A free iPad-friendly free body diagram and equation-solving workspace with Apple Pencil Scribble input.",
   "start_url": "/",
   "display": "standalone",
   "background_color": "#f4f7fb",

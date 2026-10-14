@@ -1,11 +1,14 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent, type Ref, type RefObject } from "react";
+import { useCallback, useEffect, useId, useMemo, useRef, useState, type PointerEvent, type Ref, type RefObject } from "react";
 import { extractVariables, LinearEquation, MathInputError, parseEquations, solveSystem, SolveResult } from "../lib/math";
 import {
   BoardDocument,
   BoardPoint,
+  BoardPenColor,
   BoardStroke,
+  BoardStrokeMode,
+  BoardStrokeStyle,
   compareRevision,
   createEmptyBoardDocument,
   setEquationText,
@@ -15,28 +18,47 @@ import {
 } from "../lib/board-document";
 import { boardSyncConfigured, readStoredBoard, useBoardSync } from "../lib/use-board-sync";
 import { calculateVariables } from "../lib/calculated-variables";
+import { validateAxisRange } from "../lib/plot-range";
 
 type Point = BoardPoint;
 type Sample = { driver: number; response: number };
+type PlotBounds = { minX: number; maxX: number; minY: number; maxY: number };
+type PlotBoundDraft = { [Key in keyof PlotBounds]: string };
+type LastPlot = { samples: Sample[]; driver: string; response: string; bounds: PlotBounds };
+
+const penColors: Array<{ id: BoardPenColor; label: string; value: string }> = [
+  { id: "navy", label: "Navy", value: "#172b4d" },
+  { id: "red", label: "Red", value: "#d84646" },
+  { id: "blue", label: "Blue", value: "#185adb" },
+  { id: "green", label: "Green", value: "#18845b" },
+];
+
+const penColorValues = Object.fromEntries(penColors.map((color) => [color.id, color.value])) as Record<BoardPenColor, string>;
 
 function DrawingPad({
   label,
   className = "",
-  onUndoStateChange,
   strokeRecords,
   onStrokeChange,
   reportCanvasRef,
+  penColor,
+  onPenColorChange,
+  strokeMode,
+  onStrokeModeChange,
 }: {
   label: string;
   className?: string;
-  onUndoStateChange: (available: boolean) => void;
   strokeRecords: Record<string, BoardStroke>;
-  onStrokeChange: (id: string, points: Point[], deleted: boolean) => void;
+  onStrokeChange: (id: string, points: Point[], deleted: boolean, style?: BoardStrokeStyle) => void;
   reportCanvasRef: RefObject<HTMLCanvasElement | null>;
+  penColor: BoardPenColor;
+  onPenColorChange: (color: BoardPenColor) => void;
+  strokeMode: BoardStrokeMode;
+  onStrokeModeChange: (mode: BoardStrokeMode) => void;
 }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const strokesRef = useRef(strokeRecords);
-  const activeStrokeRef = useRef<{ id: string; points: Point[] } | null>(null);
+  const activeStrokeRef = useRef<{ id: string; points: Point[]; color: BoardPenColor; mode: BoardStrokeMode } | null>(null);
   const lastSyncAtRef = useRef(0);
   const [hasMarks, setHasMarks] = useState(false);
 
@@ -45,23 +67,50 @@ function DrawingPad({
     const context = canvas?.getContext("2d");
     if (!canvas || !context) return;
     context.clearRect(0, 0, canvas.width, canvas.height);
-    context.strokeStyle = "#172b4d";
     context.lineCap = "round";
     context.lineJoin = "round";
     const strokes = [
       ...Object.values(strokesRef.current)
         .filter((stroke) => !stroke.deleted)
         .sort((left, right) => compareRevision(left.created, right.created))
-        .map((stroke) => stroke.points),
-      ...(activeStrokeRef.current ? [activeStrokeRef.current.points] : []),
+        .map((stroke) => stroke),
+      ...(activeStrokeRef.current ? [activeStrokeRef.current] : []),
     ];
     for (const stroke of strokes) {
-      if (stroke.length === 0) continue;
+      if (stroke.points.length === 0) continue;
+      const first = stroke.points[0];
+      const last = stroke.points[stroke.points.length - 1];
+      const pixelRatio = window.devicePixelRatio || 1;
+      const startX = first.x * canvas.width;
+      const startY = first.y * canvas.height;
+      const endX = last.x * canvas.width;
+      const endY = last.y * canvas.height;
       context.beginPath();
-      context.moveTo(stroke[0].x * canvas.width, stroke[0].y * canvas.height);
-      for (const point of stroke.slice(1)) {
-        context.lineWidth = Math.max(1.5, point.pressure * 3.2) * (window.devicePixelRatio || 1);
-        context.lineTo(point.x * canvas.width, point.y * canvas.height);
+      context.globalCompositeOperation = stroke.mode === "eraser" ? "destination-out" : "source-over";
+      context.strokeStyle = penColorValues[stroke.color ?? "navy"];
+      context.lineWidth = stroke.mode === "eraser"
+        ? 24 * pixelRatio
+        : Math.max(1.5, last.pressure * 3.2) * pixelRatio;
+      if ((stroke.mode === "eraser" || stroke.mode === "freehand") && stroke.points.length === 1) {
+        context.arc(startX, startY, context.lineWidth / 2, 0, Math.PI * 2);
+      } else if (stroke.mode === "circle") {
+        context.arc(startX, startY, Math.hypot(endX - startX, endY - startY), 0, Math.PI * 2);
+      } else if (stroke.mode === "arrow") {
+        const angle = Math.atan2(endY - startY, endX - startX);
+        const length = Math.hypot(endX - startX, endY - startY);
+        const headLength = Math.min(18 * pixelRatio, length * 0.4);
+        const headAngle = Math.PI / 6;
+        context.moveTo(startX, startY);
+        context.lineTo(endX, endY);
+        context.lineTo(endX - headLength * Math.cos(angle - headAngle), endY - headLength * Math.sin(angle - headAngle));
+        context.moveTo(endX, endY);
+        context.lineTo(endX - headLength * Math.cos(angle + headAngle), endY - headLength * Math.sin(angle + headAngle));
+      } else {
+        context.moveTo(startX, startY);
+        const points = stroke.mode === "straight" ? [last] : stroke.points.slice(1);
+        for (const point of points) {
+          context.lineTo(point.x * canvas.width, point.y * canvas.height);
+        }
       }
       context.stroke();
     }
@@ -71,9 +120,8 @@ function DrawingPad({
     strokesRef.current = strokeRecords;
     const visibleStrokes = Object.values(strokeRecords).filter((stroke) => !stroke.deleted);
     setHasMarks(visibleStrokes.length > 0);
-    onUndoStateChange(visibleStrokes.length > 0);
     redraw();
-  }, [onUndoStateChange, redraw, strokeRecords]);
+  }, [redraw, strokeRecords]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -109,7 +157,6 @@ function DrawingPad({
     for (const [id] of removedStrokes) onStrokeChange(id, [], true);
     activeStrokeRef.current = null;
     setHasMarks(false);
-    onUndoStateChange(false);
     redraw();
   };
 
@@ -123,7 +170,6 @@ function DrawingPad({
     onStrokeChange(id, [], true);
     const hasVisibleStrokes = Object.values(strokesRef.current).some((item) => !item.deleted);
     setHasMarks(hasVisibleStrokes);
-    onUndoStateChange(hasVisibleStrokes);
     redraw();
   };
 
@@ -134,86 +180,148 @@ function DrawingPad({
       window.removeEventListener("clear-sketch", clear);
       window.removeEventListener("undo-sketch", undo);
     };
-  }, [onStrokeChange, onUndoStateChange, redraw]);
+  }, [onStrokeChange, redraw]);
 
   return (
-    <div className={`pad-shell ${className}`}>
-      <canvas
-        ref={(canvas) => {
-          canvasRef.current = canvas;
-          reportCanvasRef.current = canvas;
-        }}
-        aria-label={label}
-        className="drawing-canvas"
-        onPointerDown={(event) => {
-          event.preventDefault();
-          if (event.button !== 0) return;
-          event.currentTarget.setPointerCapture(event.pointerId);
-          activeStrokeRef.current = { id: crypto.randomUUID(), points: [pointFromEvent(event)] };
-          lastSyncAtRef.current = performance.now();
-          redraw();
-        }}
-        onPointerMove={(event) => {
-          if (!activeStrokeRef.current) return;
-          event.preventDefault();
-          activeStrokeRef.current.points.push(pointFromEvent(event));
-          if (performance.now() - lastSyncAtRef.current >= 100) {
-            const { id, points } = activeStrokeRef.current;
-            onStrokeChange(id, [...points], false);
+    <>
+      <div className="sketch-toolbar pane-toolbar">
+        <h1>Diagram</h1>
+        <div className="sketch-actions">
+          <div className="pen-colors" role="group" aria-label="Pen color">
+            {penColors.map((color) => (
+              <button
+                key={color.id}
+                className="pen-color-button"
+                type="button"
+                style={{ backgroundColor: color.value }}
+                aria-label={`${color.label} pen`}
+                aria-pressed={penColor === color.id}
+                onClick={() => onPenColorChange(color.id)}
+              />
+            ))}
+          </div>
+          <div className="pen-modes" role="group" aria-label="Drawing tool">
+            <button className="pen-mode-button" type="button" title="Freehand drawing" aria-label="Freehand drawing" aria-pressed={strokeMode === "freehand"} onClick={() => onStrokeModeChange("freehand")}>Free</button>
+            <button className="pen-mode-button" type="button" title="Straight line" aria-label="Straight line" aria-pressed={strokeMode === "straight"} onClick={() => onStrokeModeChange("straight")}>Line</button>
+            <button className="pen-mode-button" type="button" title="Circle" aria-label="Circle" aria-pressed={strokeMode === "circle"} onClick={() => onStrokeModeChange("circle")}>Circle</button>
+            <button className="pen-mode-button" type="button" title="Arrow" aria-label="Arrow" aria-pressed={strokeMode === "arrow"} onClick={() => onStrokeModeChange("arrow")}>Arrow</button>
+            <button className="pen-mode-button" type="button" title="Eraser" aria-label="Eraser" aria-pressed={strokeMode === "eraser"} onClick={() => onStrokeModeChange("eraser")}>Erase</button>
+          </div>
+          <button className="quiet-button" type="button" disabled={!hasMarks} onClick={() => window.dispatchEvent(new Event("undo-sketch"))}>Undo</button>
+          <button className="quiet-button" type="button" onClick={() => window.dispatchEvent(new Event("clear-sketch"))}>Clear</button>
+        </div>
+      </div>
+      <div className={`pad-shell ${className}`}>
+        <canvas
+          ref={(canvas) => {
+            canvasRef.current = canvas;
+            reportCanvasRef.current = canvas;
+          }}
+          aria-label={label}
+          className="drawing-canvas"
+          onPointerDown={(event) => {
+            event.preventDefault();
+            if (event.button !== 0) return;
+            event.currentTarget.setPointerCapture(event.pointerId);
+            activeStrokeRef.current = {
+              id: crypto.randomUUID(),
+              points: [pointFromEvent(event)],
+              color: penColor,
+              mode: strokeMode,
+            };
             lastSyncAtRef.current = performance.now();
-          }
-          redraw();
-        }}
-        onPointerUp={(event) => {
-          if (!activeStrokeRef.current) return;
-          const { id, points } = activeStrokeRef.current;
-          onStrokeChange(id, [...points], false);
-          strokesRef.current = {
-            ...strokesRef.current,
-            [id]: {
-              points,
-              deleted: false,
-              revision: { counter: Date.now(), clientId: id },
-              created: { counter: Date.now(), clientId: id },
-            },
-          };
-          activeStrokeRef.current = null;
-          setHasMarks(true);
-          onUndoStateChange(true);
-          redraw();
-        }}
-        onPointerCancel={() => {
-          if (activeStrokeRef.current) {
-            const { id, points } = activeStrokeRef.current;
-            onStrokeChange(id, [...points], false);
+            redraw();
+          }}
+          onPointerMove={(event) => {
+            const activeStroke = activeStrokeRef.current;
+            if (!activeStroke) return;
+            event.preventDefault();
+            const point = pointFromEvent(event);
+            if (activeStroke.mode === "straight") {
+              activeStroke.points = [activeStroke.points[0], point];
+            } else {
+              activeStroke.points.push(point);
+            }
+            if (performance.now() - lastSyncAtRef.current >= 100) {
+              const { id, points, color, mode } = activeStroke;
+              onStrokeChange(id, [...points], false, { color, mode });
+              lastSyncAtRef.current = performance.now();
+            }
+            redraw();
+          }}
+          onPointerUp={(event) => {
+            const activeStroke = activeStrokeRef.current;
+            if (!activeStroke) return;
+            const endPoint = pointFromEvent(event);
+            if (activeStroke.mode === "straight") {
+              activeStroke.points = [activeStroke.points[0], endPoint];
+            } else {
+              const lastPoint = activeStroke.points[activeStroke.points.length - 1];
+              if (lastPoint.x !== endPoint.x || lastPoint.y !== endPoint.y) activeStroke.points.push(endPoint);
+            }
+            const { id, points, color, mode } = activeStroke;
+            onStrokeChange(id, [...points], false, { color, mode });
             strokesRef.current = {
               ...strokesRef.current,
               [id]: {
                 points,
                 deleted: false,
+                color,
+                mode,
                 revision: { counter: Date.now(), clientId: id },
                 created: { counter: Date.now(), clientId: id },
               },
             };
             activeStrokeRef.current = null;
             setHasMarks(true);
-            onUndoStateChange(true);
             redraw();
-          }
-        }}
-        onContextMenu={(event) => event.preventDefault()}
-        onDragStart={(event) => event.preventDefault()}
-        onLostPointerCapture={() => {
-          if (activeStrokeRef.current) {
-            const { id, points } = activeStrokeRef.current;
-            onStrokeChange(id, [...points], false);
+          }}
+          onPointerCancel={() => {
+            const activeStroke = activeStrokeRef.current;
+            if (!activeStroke) return;
+            const { id, points, color, mode } = activeStroke;
+            onStrokeChange(id, [...points], false, { color, mode });
+            strokesRef.current = {
+              ...strokesRef.current,
+              [id]: {
+                points,
+                deleted: false,
+                color,
+                mode,
+                revision: { counter: Date.now(), clientId: id },
+                created: { counter: Date.now(), clientId: id },
+              },
+            };
             activeStrokeRef.current = null;
+            setHasMarks(true);
             redraw();
-          }
-        }}
-      />
-      {!hasMarks && <div className="pad-placeholder" aria-hidden="true">Write or draw here with Apple Pencil</div>}
-    </div>
+          }}
+          onContextMenu={(event) => event.preventDefault()}
+          onDragStart={(event) => event.preventDefault()}
+          onLostPointerCapture={() => {
+            if (activeStrokeRef.current) {
+              const { id, points, color, mode } = activeStrokeRef.current;
+              onStrokeChange(id, [...points], false, { color, mode });
+              strokesRef.current = {
+                ...strokesRef.current,
+                [id]: {
+                  points,
+                  deleted: false,
+                  color,
+                  mode,
+                  revision: { counter: Date.now(), clientId: id },
+                  created: { counter: Date.now(), clientId: id },
+                },
+              };
+              activeStrokeRef.current = null;
+              setHasMarks(true);
+              redraw();
+            }
+          }}
+        />
+        {!hasMarks && <div className="pad-placeholder" aria-hidden="true">Write or draw here with Apple Pencil</div>}
+      </div>
+    </>
   );
 }
 
@@ -222,16 +330,20 @@ function formatNumber(value: number): string {
 }
 
 function axisTicks(min: number, max: number) {
-  const span = max - min || Math.max(1, Math.abs(min) * 0.1);
+  const span = max - min;
   const roughStep = span / 5;
-  const magnitude = 10 ** Math.floor(Math.log10(roughStep));
+  if (!Number.isFinite(roughStep) || roughStep <= 0) return { values: [] };
+  const rawMagnitude = 10 ** Math.floor(Math.log10(roughStep));
+  const magnitude = Number.isFinite(rawMagnitude) && rawMagnitude > 0 ? rawMagnitude : roughStep;
   const fraction = roughStep / magnitude;
   const niceFraction = fraction <= 1 ? 1 : fraction <= 2 ? 2 : fraction <= 2.5 ? 2.5 : fraction <= 5 ? 5 : 10;
   const step = niceFraction * magnitude;
-  const start = Math.floor(min / step) * step;
-  const end = Math.ceil(max / step) * step;
-  const values = Array.from({ length: Math.round((end - start) / step) + 1 }, (_, index) => start + index * step);
-  return { min: start, max: end === start ? start + step : end, values };
+  if (!Number.isFinite(step) || step <= 0) return { values: [] };
+  const firstIndex = Math.ceil(min / step);
+  const lastIndex = Math.floor(max / step);
+  if (!Number.isSafeInteger(firstIndex) || !Number.isSafeInteger(lastIndex)) return { values: [] };
+  const count = Math.min(20, Math.max(0, lastIndex - firstIndex + 1));
+  return { values: Array.from({ length: count }, (_, index) => (firstIndex + index) * step) };
 }
 
 function HighlightedEquation({ equation, variables, known, calculated }: {
@@ -280,31 +392,45 @@ function buildSamples(
   return { samples };
 }
 
-function ResponsePlot({ samples, driver, response, svgRef }: {
+function defaultPlotBounds(samples: Sample[]): PlotBounds | null {
+  const minX = samples[0]?.driver;
+  const maxX = samples[samples.length - 1]?.driver;
+  const responses = samples.map((sample) => sample.response);
+  const rawMinY = Math.min(...responses);
+  const rawMaxY = Math.max(...responses);
+  const responseSpan = rawMaxY - rawMinY;
+  if (minX === undefined || maxX === undefined || !Number.isFinite(responseSpan)) return null;
+  const yPadding = responseSpan === 0 ? Math.max(1, Math.abs(rawMinY) * 0.05) : responseSpan * 0.05;
+  const bounds = { minX, maxX, minY: rawMinY - yPadding, maxY: rawMaxY + yPadding };
+  const xRange = validateAxisRange(String(bounds.minX), String(bounds.maxX));
+  const yRange = validateAxisRange(String(bounds.minY), String(bounds.maxY));
+  if (!xRange.ok || !yRange.ok) return null;
+  return { minX, maxX, minY: bounds.minY, maxY: bounds.maxY };
+}
+
+function ResponsePlot({ samples, driver, response, bounds, svgRef }: {
   samples: Sample[];
   driver: string;
   response: string;
+  bounds: PlotBounds;
   svgRef?: Ref<SVGSVGElement>;
 }) {
+  const plotId = useId().replace(/[^a-zA-Z0-9_-]/g, "");
   const width = 1200;
   const height = 760;
   const padding = { top: 36, right: 48, bottom: 84, left: 112 };
-  const xs = samples.map((sample) => sample.driver);
-  const ys = samples.map((sample) => sample.response);
-  const minX = Math.min(...xs);
-  const maxX = Math.max(...xs);
-  const rawMinY = Math.min(...ys);
-  const rawMaxY = Math.max(...ys);
-  const yPadding = rawMinY === rawMaxY ? Math.max(1, Math.abs(rawMinY) * 0.05) : (rawMaxY - rawMinY) * 0.05;
-  const minY = rawMinY - yPadding;
-  const maxY = rawMaxY + yPadding;
-  const xAxis = axisTicks(minX, maxX);
-  const yAxis = axisTicks(minY, maxY);
-  const x = (value: number) => padding.left + ((value - xAxis.min) / (xAxis.max - xAxis.min)) * (width - padding.left - padding.right);
-  const y = (value: number) => height - padding.bottom - ((value - yAxis.min) / (yAxis.max - yAxis.min)) * (height - padding.top - padding.bottom);
+  const xAxis = axisTicks(bounds.minX, bounds.maxX);
+  const yAxis = axisTicks(bounds.minY, bounds.maxY);
+  const x = (value: number) => padding.left + ((value - bounds.minX) / (bounds.maxX - bounds.minX)) * (width - padding.left - padding.right);
+  const y = (value: number) => height - padding.bottom - ((value - bounds.minY) / (bounds.maxY - bounds.minY)) * (height - padding.top - padding.bottom);
   const points = samples.map((sample) => `${x(sample.driver)},${y(sample.response)}`).join(" ");
   return (
     <svg ref={svgRef} className="response-plot" viewBox={`0 0 ${width} ${height}`} role="img" aria-label={`${response} plotted against ${driver}`}>
+      <defs>
+        <clipPath id={`plot-area-${plotId}`}>
+          <rect x={padding.left} y={padding.top} width={width - padding.left - padding.right} height={height - padding.top - padding.bottom} />
+        </clipPath>
+      </defs>
       {xAxis.values.map((tick, index) => (
         <g key={`x-${index}`}>
           <line x1={x(tick)} y1={padding.top} x2={x(tick)} y2={height - padding.bottom} className="plot-grid" />
@@ -319,10 +445,37 @@ function ResponsePlot({ samples, driver, response, svgRef }: {
       ))}
       <line x1={padding.left} y1={padding.top} x2={padding.left} y2={height - padding.bottom} className="plot-axis" />
       <line x1={padding.left} y1={height - padding.bottom} x2={width - padding.right} y2={height - padding.bottom} className="plot-axis" />
-      <polyline points={points} className="plot-line" />
+      <polyline points={points} className="plot-line" clipPath={`url(#plot-area-${plotId})`} />
       <text x={width / 2} y={height - 15} textAnchor="middle" className="plot-axis-title">{driver}</text>
       <text transform={`translate(28 ${height / 2}) rotate(-90)`} textAnchor="middle" className="plot-axis-title">{response}</text>
     </svg>
+  );
+}
+
+function PlotLimitInput({
+  className,
+  label,
+  value,
+  invalid,
+  onChange,
+}: {
+  className: string;
+  label: string;
+  value: string;
+  invalid: boolean;
+  onChange: (value: string) => void;
+}) {
+  return (
+    <label className={`plot-limit ${className}`}>
+      <span>{label}</span>
+      <input
+        inputMode="decimal"
+        aria-label={label}
+        aria-invalid={invalid}
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
+      />
+    </label>
   );
 }
 
@@ -341,10 +494,13 @@ export default function Home() {
   const [rangeEnd, setRangeEnd] = useState("10");
   const [sampleCount, setSampleCount] = useState("21");
   const [samples, setSamples] = useState<Sample[] | null>(null);
-  const [lastPlot, setLastPlot] = useState<{ samples: Sample[]; driver: string; response: string } | null>(null);
+  const [lastPlot, setLastPlot] = useState<LastPlot | null>(null);
+  const [plotBoundDraft, setPlotBoundDraft] = useState<PlotBoundDraft | null>(null);
+  const [plotBoundMessage, setPlotBoundMessage] = useState("");
   const [sweepMessage, setSweepMessage] = useState("");
   const [pwaMessage, setPwaMessage] = useState("");
-  const [canUndoSketch, setCanUndoSketch] = useState(false);
+  const [penColor, setPenColor] = useState<BoardPenColor>("navy");
+  const [strokeMode, setStrokeMode] = useState<BoardStrokeMode>("freehand");
   const [reportOpen, setReportOpen] = useState(false);
   const [projectTitle, setProjectTitle] = useState("");
   const [reportMessage, setReportMessage] = useState("");
@@ -435,6 +591,7 @@ export default function Home() {
   const runSweep = () => {
     setSamples(null);
     setSweepMessage("");
+    setPlotBoundMessage("");
     if (availableValues === null) {
       setSweepMessage("Enter a finite value for each known variable first.");
       return;
@@ -459,8 +616,19 @@ export default function Home() {
       setSweepMessage(sweep.error ?? "The parameter sweep could not be computed.");
       return;
     }
+    const bounds = defaultPlotBounds(sweep.samples);
+    if (!bounds) {
+      setSweepMessage("The result range is too large or too small to plot. Use a narrower sweep range.");
+      return;
+    }
+    setPlotBoundDraft({
+      minX: String(bounds.minX),
+      maxX: String(bounds.maxX),
+      minY: String(bounds.minY),
+      maxY: String(bounds.maxY),
+    });
     setSamples(sweep.samples);
-    setLastPlot({ samples: sweep.samples, driver: currentDriver, response: currentResponse });
+    setLastPlot({ samples: sweep.samples, driver: currentDriver, response: currentResponse, bounds });
   };
 
   useEffect(() => {
@@ -483,10 +651,32 @@ export default function Home() {
     setSweepMessage("");
   };
 
-  const updateStroke = useCallback((id: string, points: Point[], deleted: boolean) => {
+  const updatePlotBound = (key: keyof PlotBounds, value: string) => {
+    if (!plotBoundDraft) return;
+    const nextDraft = { ...plotBoundDraft, [key]: value };
+    setPlotBoundDraft(nextDraft);
+    const xRange = validateAxisRange(nextDraft.minX, nextDraft.maxX);
+    if (!xRange.ok) {
+      setPlotBoundMessage(`X axis: ${xRange.message}`);
+      return;
+    }
+    const yRange = validateAxisRange(nextDraft.minY, nextDraft.maxY);
+    if (!yRange.ok) {
+      setPlotBoundMessage(`Y axis: ${yRange.message}`);
+      return;
+    }
+    const bounds = { minX: xRange.range.min, maxX: xRange.range.max, minY: yRange.range.min, maxY: yRange.range.max };
+    setLastPlot((current) => current ? { ...current, bounds } : current);
+    setPlotBoundMessage("");
+  };
+
+  const plotXRange = plotBoundDraft ? validateAxisRange(plotBoundDraft.minX, plotBoundDraft.maxX) : null;
+  const plotYRange = plotBoundDraft ? validateAxisRange(plotBoundDraft.minY, plotBoundDraft.maxY) : null;
+
+  const updateStroke = useCallback((id: string, points: Point[], deleted: boolean, style?: BoardStrokeStyle) => {
     const currentClientId = clientIdRef.current;
     if (!currentClientId) return;
-    setBoardDocument((current) => setStroke(current, id, points, deleted, currentClientId));
+    setBoardDocument((current) => setStroke(current, id, points, deleted, currentClientId, style));
   }, []);
 
   const activateRoom = (id: string, restore = true) => {
@@ -666,19 +856,15 @@ export default function Home() {
 
       <div className="board-split">
         <section className="board-pane sketch-pane" aria-label="Free body diagram">
-          <div className="pane-toolbar">
-            <h1>Diagram</h1>
-            <div className="sketch-actions">
-              <button className="quiet-button" type="button" disabled={!canUndoSketch} onClick={() => window.dispatchEvent(new Event("undo-sketch"))}>Undo</button>
-              <button className="quiet-button" type="button" onClick={() => window.dispatchEvent(new Event("clear-sketch"))}>Clear</button>
-            </div>
-          </div>
           <DrawingPad
             label="Free body diagram sketch pad"
-            onUndoStateChange={setCanUndoSketch}
             strokeRecords={boardDocument.strokes}
             onStrokeChange={updateStroke}
             reportCanvasRef={reportCanvasRef}
+            penColor={penColor}
+            onPenColorChange={setPenColor}
+            strokeMode={strokeMode}
+            onStrokeModeChange={setStrokeMode}
           />
         </section>
 
@@ -810,7 +996,16 @@ export default function Home() {
             <h2 id="plot-title">{currentResponse} vs. {currentDriver}</h2>
             <button className="plot-close" type="button" onClick={() => setSamples(null)} autoFocus>Close plot</button>
           </header>
-          <ResponsePlot samples={samples} driver={currentDriver} response={currentResponse} />
+          {plotBoundDraft && lastPlot && (
+            <div className="plot-stage">
+              <ResponsePlot samples={samples} driver={currentDriver} response={currentResponse} bounds={lastPlot.bounds} />
+              <PlotLimitInput className="plot-limit-x-min" label="X minimum" value={plotBoundDraft.minX} invalid={plotXRange?.ok === false} onChange={(value) => updatePlotBound("minX", value)} />
+              <PlotLimitInput className="plot-limit-x-max" label="X maximum" value={plotBoundDraft.maxX} invalid={plotXRange?.ok === false} onChange={(value) => updatePlotBound("maxX", value)} />
+              <PlotLimitInput className="plot-limit-y-min" label="Y minimum" value={plotBoundDraft.minY} invalid={plotYRange?.ok === false} onChange={(value) => updatePlotBound("minY", value)} />
+              <PlotLimitInput className="plot-limit-y-max" label="Y maximum" value={plotBoundDraft.maxY} invalid={plotYRange?.ok === false} onChange={(value) => updatePlotBound("maxY", value)} />
+            </div>
+          )}
+          {plotBoundMessage && <p className="plot-range-error" role="alert">{plotBoundMessage}</p>}
           <div className="sample-table-wrap plot-table">
             <table>
               <thead><tr><th>{currentDriver}</th><th>{currentResponse}</th></tr></thead>
@@ -825,6 +1020,7 @@ export default function Home() {
             samples={lastPlot.samples}
             driver={lastPlot.driver}
             response={lastPlot.response}
+            bounds={lastPlot.bounds}
             svgRef={reportPlotRef}
           />
         </div>

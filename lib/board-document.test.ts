@@ -4,22 +4,30 @@ import {
   getVisibleStrokes,
   isBoardDocument,
   mergeBoardDocuments,
+  setStroke,
   setEquationText,
   setKnown,
   setKnownValue,
-  setStroke,
 } from "./board-document";
 
 describe("shared board document", () => {
   it("merges concurrent equation, variable, and sketch changes without losing either device's edits", () => {
     const empty = createEmptyBoardDocument();
-    const ipad = setStroke(empty, "ipad-stroke", [{ x: 0.2, y: 0.4, pressure: 0.5 }], false, "ipad");
+    const ipad = setStroke(
+      empty,
+      "ipad-stroke",
+      [{ x: 0.2, y: 0.4, pressure: 0.5 }],
+      false,
+      "ipad",
+      { color: "red", mode: "straight" },
+    );
     const desktop = setEquationText(empty, "Fx=10", "desktop");
 
     const merged = mergeBoardDocuments(ipad, desktop);
 
     expect(merged.equationText.value).toBe("Fx=10");
     expect(getVisibleStrokes(merged).map(({ id }) => id)).toEqual(["ipad-stroke"]);
+    expect(merged.strokes["ipad-stroke"]).toMatchObject({ color: "red", mode: "straight" });
   });
 
   it("merges known values and marks independently by variable", () => {
@@ -55,5 +63,47 @@ describe("shared board document", () => {
         },
       },
     })).toBe(false);
+    const styled = setStroke(valid, "00000000-0000-4000-8000-000000000001", [], false, "ipad", {
+      color: "green",
+      mode: "circle",
+    });
+    expect(isBoardDocument(styled)).toBe(true);
+    const arrow = setStroke(styled, "00000000-0000-4000-8000-000000000004", [], false, "ipad", {
+      color: "red",
+      mode: "arrow",
+    });
+    const eraser = setStroke(arrow, "00000000-0000-4000-8000-000000000005", [], false, "ipad", {
+      color: "navy",
+      mode: "eraser",
+    });
+    expect(isBoardDocument(eraser)).toBe(true);
+    expect(isBoardDocument({
+      ...eraser,
+      strokes: {
+        ...eraser.strokes,
+        "00000000-0000-4000-8000-000000000002": {
+          ...eraser.strokes["00000000-0000-4000-8000-000000000001"],
+          color: "ultraviolet",
+        },
+      },
+    })).toBe(false);
+  });
+
+  it("keeps a stroke's style when recording a deletion", () => {
+    const document = setStroke(
+      createEmptyBoardDocument(),
+      "00000000-0000-4000-8000-000000000003",
+      [{ x: 0.1, y: 0.2, pressure: 0.5 }],
+      false,
+      "ipad",
+      { color: "blue", mode: "straight" },
+    );
+    const deleted = setStroke(document, "00000000-0000-4000-8000-000000000003", [], true, "ipad");
+
+    expect(deleted.strokes["00000000-0000-4000-8000-000000000003"]).toMatchObject({
+      deleted: true,
+      color: "blue",
+      mode: "straight",
+    });
   });
 });

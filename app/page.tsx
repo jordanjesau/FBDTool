@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent, type Ref, type RefObject } from "react";
 import { extractVariables, LinearEquation, MathInputError, parseEquations, solveSystem, SolveResult } from "../lib/math";
 import {
   BoardDocument,
@@ -24,12 +24,14 @@ function DrawingPad({
   onUndoStateChange,
   strokeRecords,
   onStrokeChange,
+  reportCanvasRef,
 }: {
   label: string;
   className?: string;
   onUndoStateChange: (available: boolean) => void;
   strokeRecords: Record<string, BoardStroke>;
   onStrokeChange: (id: string, points: Point[], deleted: boolean) => void;
+  reportCanvasRef: RefObject<HTMLCanvasElement | null>;
 }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const strokesRef = useRef(strokeRecords);
@@ -136,7 +138,10 @@ function DrawingPad({
   return (
     <div className={`pad-shell ${className}`}>
       <canvas
-        ref={canvasRef}
+        ref={(canvas) => {
+          canvasRef.current = canvas;
+          reportCanvasRef.current = canvas;
+        }}
         aria-label={label}
         className="drawing-canvas"
         onPointerDown={(event) => {
@@ -273,7 +278,12 @@ function buildSamples(
   return { samples };
 }
 
-function ResponsePlot({ samples, driver, response }: { samples: Sample[]; driver: string; response: string }) {
+function ResponsePlot({ samples, driver, response, svgRef }: {
+  samples: Sample[];
+  driver: string;
+  response: string;
+  svgRef?: Ref<SVGSVGElement>;
+}) {
   const width = 1200;
   const height = 760;
   const padding = { top: 36, right: 48, bottom: 84, left: 112 };
@@ -292,7 +302,7 @@ function ResponsePlot({ samples, driver, response }: { samples: Sample[]; driver
   const y = (value: number) => height - padding.bottom - ((value - yAxis.min) / (yAxis.max - yAxis.min)) * (height - padding.top - padding.bottom);
   const points = samples.map((sample) => `${x(sample.driver)},${y(sample.response)}`).join(" ");
   return (
-    <svg className="response-plot" viewBox={`0 0 ${width} ${height}`} role="img" aria-label={`${response} plotted against ${driver}`}>
+    <svg ref={svgRef} className="response-plot" viewBox={`0 0 ${width} ${height}`} role="img" aria-label={`${response} plotted against ${driver}`}>
       {xAxis.values.map((tick, index) => (
         <g key={`x-${index}`}>
           <line x1={x(tick)} y1={padding.top} x2={x(tick)} y2={height - padding.bottom} className="plot-grid" />
@@ -329,9 +339,16 @@ export default function Home() {
   const [rangeEnd, setRangeEnd] = useState("10");
   const [sampleCount, setSampleCount] = useState("21");
   const [samples, setSamples] = useState<Sample[] | null>(null);
+  const [lastPlot, setLastPlot] = useState<{ samples: Sample[]; driver: string; response: string } | null>(null);
   const [sweepMessage, setSweepMessage] = useState("");
   const [pwaMessage, setPwaMessage] = useState("");
   const [canUndoSketch, setCanUndoSketch] = useState(false);
+  const [reportOpen, setReportOpen] = useState(false);
+  const [projectTitle, setProjectTitle] = useState("");
+  const [reportMessage, setReportMessage] = useState("");
+  const [reporting, setReporting] = useState(false);
+  const reportCanvasRef = useRef<HTMLCanvasElement>(null);
+  const reportPlotRef = useRef<SVGSVGElement>(null);
   const equationText = boardDocument.equationText.value;
   const known = useMemo(
     () => Object.fromEntries(Object.entries(boardDocument.known).map(([name, field]) => [name, field.value])),
@@ -433,16 +450,20 @@ export default function Home() {
       return;
     }
     setSamples(sweep.samples);
+    setLastPlot({ samples: sweep.samples, driver: currentDriver, response: currentResponse });
   };
 
   useEffect(() => {
-    if (!samples) return;
+    if (!samples && !reportOpen) return;
     const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setSamples(null);
+      if (event.key === "Escape") {
+        setSamples(null);
+        setReportOpen(false);
+      }
     };
     window.addEventListener("keydown", closeOnEscape);
     return () => window.removeEventListener("keydown", closeOnEscape);
-  }, [samples]);
+  }, [reportOpen, samples]);
 
   const updateEquations = (value: string) => {
     setBoardDocument((current) => setEquationText(current, value, clientIdRef.current));
@@ -527,6 +548,52 @@ export default function Home() {
     setSweepMessage("");
   };
 
+  const exportReport = async () => {
+    setReporting(true);
+    setReportMessage("");
+    try {
+      const { createBoardReport, svgToPng } = await import("../lib/board-report");
+      const canvas = reportCanvasRef.current;
+      if (!canvas) throw new Error("The diagram is not ready to export. Try again.");
+      let plotPng: string | undefined;
+      if (lastPlot) {
+        const svg = reportPlotRef.current;
+        if (!svg) throw new Error("The last plot is not ready to export. Try again.");
+        plotPng = await svgToPng(svg);
+      }
+      const pdf = createBoardReport({
+        title: projectTitle,
+        generatedAt: new Date(),
+        equations: equationText,
+        variables: variables.map((name) => ({
+          name,
+          known: !!known[name],
+          value: knownValues[name] ?? "",
+        })),
+        ...(parsed.error ? { parseError: parsed.error } : {}),
+        sketchPng: canvas.toDataURL("image/png"),
+        ...(lastPlot && plotPng ? {
+          plot: {
+            png: plotPng,
+            driver: lastPlot.driver,
+            response: lastPlot.response,
+          },
+        } : {}),
+      });
+      const filename = (projectTitle.trim() || "mechanics-report")
+        .replace(/[<>:"/\\|?*\u0000-\u001f]/g, "-")
+        .replace(/\s+/g, "-")
+        .replace(/-+/g, "-")
+        .slice(0, 80);
+      pdf.save(`${filename || "mechanics-report"}.pdf`);
+      setReportOpen(false);
+    } catch (error) {
+      setReportMessage(error instanceof Error ? error.message : "Could not generate the PDF report.");
+    } finally {
+      setReporting(false);
+    }
+  };
+
   return (
     <main className="whiteboard">
       <header className="board-toolbar">
@@ -535,6 +602,7 @@ export default function Home() {
           <span>FBD <strong>Whiteboard</strong></span>
         </a>
         <div className="toolbar-actions">
+          <button className="report-button" type="button" onClick={() => { setReportMessage(""); setReportOpen(true); }}>PDF report</button>
           <span className={`local-indicator sync-indicator sync-${sync.status}`} aria-live="polite">
             <span />{sync.status === "connected" ? sync.deviceCount > 1 ? `${sync.deviceCount} devices` : "Sync ready" : sync.status === "connecting" ? "Connecting" : sync.status === "error" ? "Sync issue" : "Local"}
           </span>
@@ -594,6 +662,7 @@ export default function Home() {
             onUndoStateChange={setCanUndoSketch}
             strokeRecords={boardDocument.strokes}
             onStrokeChange={updateStroke}
+            reportCanvasRef={reportCanvasRef}
           />
         </section>
 
@@ -728,6 +797,51 @@ export default function Home() {
             </table>
           </div>
         </section>
+      )}
+      {lastPlot && (
+        <div className="report-plot-source" aria-hidden="true">
+          <ResponsePlot
+            samples={lastPlot.samples}
+            driver={lastPlot.driver}
+            response={lastPlot.response}
+            svgRef={reportPlotRef}
+          />
+        </div>
+      )}
+      {reportOpen && (
+        <div className="report-overlay" onClick={() => !reporting && setReportOpen(false)}>
+          <section
+            className="report-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="report-title"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="report-dialog-heading">
+              <div>
+                <h2 id="report-title">PDF report</h2>
+                <p>One page, generated on this device.</p>
+              </div>
+              <button className="report-close" type="button" aria-label="Close report dialog" onClick={() => setReportOpen(false)}>×</button>
+            </div>
+            <label className="report-title-label" htmlFor="project-title">Project title</label>
+            <input
+              id="project-title"
+              className="report-title-input"
+              value={projectTitle}
+              maxLength={100}
+              onChange={(event) => setProjectTitle(event.target.value)}
+              placeholder="Untitled mechanics report"
+            />
+            <p className="report-includes">
+              Includes the diagram, equations, and variable status{lastPlot ? ", plus the last plot generated." : "."}
+            </p>
+            {reportMessage && <p className="inline-message error" role="alert">{reportMessage}</p>}
+            <button className="solve-button report-export" type="button" onClick={() => void exportReport()} disabled={reporting}>
+              {reporting ? "Creating PDF..." : "Download PDF"}
+            </button>
+          </section>
+        </div>
       )}
     </main>
   );

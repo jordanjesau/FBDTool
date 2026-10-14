@@ -1,11 +1,16 @@
 export type Revision = { counter: number; clientId: string };
 export type Versioned<T> = { value: T; revision: Revision };
 export type BoardPoint = { x: number; y: number; pressure: number };
+export type BoardPenColor = "navy" | "red" | "blue" | "green";
+export type BoardStrokeMode = "freehand" | "straight" | "circle" | "arrow" | "eraser";
+export type BoardStrokeStyle = { color: BoardPenColor; mode: BoardStrokeMode };
 export type BoardStroke = {
   points: BoardPoint[];
   deleted: boolean;
   revision: Revision;
   created: Revision;
+  color?: BoardPenColor;
+  mode?: BoardStrokeMode;
 };
 export type BoardDocument = {
   version: 1;
@@ -59,6 +64,7 @@ export function setStroke(
   points: BoardPoint[],
   deleted: boolean,
   clientId: string,
+  style?: BoardStrokeStyle,
 ): BoardDocument {
   const revision = nextRevision(document, clientId);
   const previous = document.strokes[id];
@@ -71,6 +77,8 @@ export function setStroke(
         deleted,
         revision,
         created: previous?.created ?? revision,
+        ...((style?.color ?? previous?.color) ? { color: style?.color ?? previous?.color } : {}),
+        ...((style?.mode ?? previous?.mode) ? { mode: style?.mode ?? previous?.mode } : {}),
       },
     },
   };
@@ -144,6 +152,8 @@ export function isBoardDocument(value: unknown): value is BoardDocument {
       if (!stroke || typeof stroke !== "object") return false;
       const record = stroke as BoardStroke;
       return typeof record.deleted === "boolean"
+        && (record.color === undefined || ["navy", "red", "blue", "green"].includes(record.color))
+        && (record.mode === undefined || ["freehand", "straight", "circle", "arrow", "eraser"].includes(record.mode))
         && Array.isArray(record.points)
         && record.points.length <= 12000
         && record.points.every((point) => !!point

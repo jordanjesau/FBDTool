@@ -27,7 +27,8 @@ describe("equation parsing", () => {
   });
 
   it("parses nonlinear products, powers, and math functions without evaluating code", () => {
-    expect(extractVariables(parseEquations("x*y=2\nsqrt(x)=y\nexp(y)=4"))).toEqual(["x", "y"]);
+    expect(extractVariables(parseEquations("x*y=2\nsqrt(x)=y\nexp(y)=4\n|x-y|=1"))).toEqual(["x", "y"]);
+    expect(parseEquation("abs(-3)=3").linearForm?.constant).toBe(0);
     expect(() => parseEquation("unknown(x)=1")).toThrow('Unsupported function "unknown".');
   });
 
@@ -70,6 +71,13 @@ describe("linear-system solving", () => {
     expect(solveSystem(parseEquations("sqrt(x)=3"), ["x"])).toMatchObject({ ok: true, values: { x: expect.closeTo(9, 6) } });
     expect(solveSystem(parseEquations("exp(x)=2"), ["x"])).toMatchObject({ ok: true, values: { x: expect.closeTo(Math.log(2), 6) } });
     expect(solveSystem(parseEquations("x^2=4\nx=2"), ["x"])).toMatchObject({ ok: true, values: { x: expect.closeTo(2, 6) } });
+  });
+
+  it("interprets trigonometric functions in degrees, including inverse functions", () => {
+    expect(solveSystem(parseEquations("sin(30)=y"), ["y"])).toMatchObject({ ok: true, values: { y: expect.closeTo(0.5, 8) } });
+    expect(solveSystem(parseEquations("asin(0.5)=angle"), ["angle"])).toMatchObject({ ok: true, values: { angle: expect.closeTo(30, 8) } });
+    expect(solveSystem(parseEquations("sin(x)=y"), ["y"], { x: 30 })).toMatchObject({ ok: true, values: { y: expect.closeTo(0.5, 8) } });
+    expect(solveSystem(parseEquations("|x|=2\nx=2"), ["x"])).toMatchObject({ ok: true, values: { x: expect.closeTo(2, 6) } });
   });
 
   it("reports multiple nonlinear roots rather than choosing one arbitrarily", () => {

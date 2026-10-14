@@ -29,6 +29,10 @@ class NonlinearExpressionError extends MathInputError {}
 
 const mathFunctions = new Set(["sqrt", "exp", "ln", "log", "log10", "sin", "cos", "tan", "asin", "acos", "atan", "abs", "sinh", "cosh", "tanh"]);
 
+function degreesToRadians(degrees: number): number {
+  return degrees * Math.PI / 180;
+}
+
 function applyMathFunction(name: string, value: number): number {
   switch (name) {
     case "sqrt": return Math.sqrt(value);
@@ -36,12 +40,12 @@ function applyMathFunction(name: string, value: number): number {
     case "ln":
     case "log": return Math.log(value);
     case "log10": return Math.log10(value);
-    case "sin": return Math.sin(value);
-    case "cos": return Math.cos(value);
-    case "tan": return Math.tan(value);
-    case "asin": return Math.asin(value);
-    case "acos": return Math.acos(value);
-    case "atan": return Math.atan(value);
+    case "sin": return Math.sin(degreesToRadians(value));
+    case "cos": return Math.cos(degreesToRadians(value));
+    case "tan": return Math.tan(degreesToRadians(value));
+    case "asin": return Math.asin(value) * 180 / Math.PI;
+    case "acos": return Math.acos(value) * 180 / Math.PI;
+    case "atan": return Math.atan(value) * 180 / Math.PI;
     case "abs": return Math.abs(value);
     case "sinh": return Math.sinh(value);
     case "cosh": return Math.cosh(value);
@@ -75,7 +79,7 @@ function tokenize(source: string): Token[] {
       continue;
     }
     const char = source[index];
-    if ("+-*/^()".includes(char)) {
+    if ("+-*/^()|".includes(char)) {
       tokens.push({ kind: "operator", value: char });
       index += 1;
       continue;
@@ -164,6 +168,13 @@ class Parser {
       if (!this.peek(")")) throw new MathInputError("Missing closing parenthesis.");
       this.take();
       return expression;
+    }
+    if (token.value === "|") {
+      this.index += 1;
+      const argument = this.parseSum();
+      if (!this.peek("|")) throw new MathInputError("Absolute value needs a closing | character.");
+      this.take();
+      return { type: "function", name: "abs", argument };
     }
     throw new MathInputError(`Expected a number, variable, or parenthesis; received "${token.value}".`);
   }

@@ -2,23 +2,39 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent } from "react";
 import { extractVariables, LinearEquation, MathInputError, parseEquations, solveSystem, SolveResult } from "../lib/math";
+import {
+  BoardDocument,
+  BoardPoint,
+  BoardStroke,
+  compareRevision,
+  createEmptyBoardDocument,
+  setEquationText,
+  setKnown,
+  setKnownValue,
+  setStroke,
+} from "../lib/board-document";
+import { boardSyncConfigured, readStoredBoard, useBoardSync } from "../lib/use-board-sync";
 
-type Point = { x: number; y: number; pressure: number };
-type Stroke = Point[];
+type Point = BoardPoint;
 type Sample = { driver: number; response: number };
 
 function DrawingPad({
   label,
   className = "",
   onUndoStateChange,
+  strokeRecords,
+  onStrokeChange,
 }: {
   label: string;
   className?: string;
   onUndoStateChange: (available: boolean) => void;
+  strokeRecords: Record<string, BoardStroke>;
+  onStrokeChange: (id: string, points: Point[], deleted: boolean) => void;
 }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const strokesRef = useRef<Stroke[]>([]);
-  const activeStrokeRef = useRef<Stroke | null>(null);
+  const strokesRef = useRef(strokeRecords);
+  const activeStrokeRef = useRef<{ id: string; points: Point[] } | null>(null);
+  const lastSyncAtRef = useRef(0);
   const [hasMarks, setHasMarks] = useState(false);
 
   const redraw = useCallback(() => {
@@ -29,7 +45,13 @@ function DrawingPad({
     context.strokeStyle = "#172b4d";
     context.lineCap = "round";
     context.lineJoin = "round";
-    const strokes = [...strokesRef.current, ...(activeStrokeRef.current ? [activeStrokeRef.current] : [])];
+    const strokes = [
+      ...Object.values(strokesRef.current)
+        .filter((stroke) => !stroke.deleted)
+        .sort((left, right) => compareRevision(left.created, right.created))
+        .map((stroke) => stroke.points),
+      ...(activeStrokeRef.current ? [activeStrokeRef.current.points] : []),
+    ];
     for (const stroke of strokes) {
       if (stroke.length === 0) continue;
       context.beginPath();
@@ -41,6 +63,14 @@ function DrawingPad({
       context.stroke();
     }
   }, []);
+
+  useEffect(() => {
+    strokesRef.current = strokeRecords;
+    const visibleStrokes = Object.values(strokeRecords).filter((stroke) => !stroke.deleted);
+    setHasMarks(visibleStrokes.length > 0);
+    onUndoStateChange(visibleStrokes.length > 0);
+    redraw();
+  }, [onUndoStateChange, redraw, strokeRecords]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -69,7 +99,11 @@ function DrawingPad({
   };
 
   const clear = () => {
-    strokesRef.current = [];
+    const removedStrokes = Object.entries(strokesRef.current).filter(([, stroke]) => !stroke.deleted);
+    strokesRef.current = Object.fromEntries(
+      Object.entries(strokesRef.current).map(([id, stroke]) => [id, { ...stroke, deleted: true, points: [] }]),
+    );
+    for (const [id] of removedStrokes) onStrokeChange(id, [], true);
     activeStrokeRef.current = null;
     setHasMarks(false);
     onUndoStateChange(false);
@@ -77,10 +111,16 @@ function DrawingPad({
   };
 
   const undo = () => {
-    if (strokesRef.current.length === 0) return;
-    strokesRef.current = strokesRef.current.slice(0, -1);
-    setHasMarks(strokesRef.current.length > 0);
-    onUndoStateChange(strokesRef.current.length > 0);
+    const last = Object.entries(strokesRef.current)
+      .filter(([, stroke]) => !stroke.deleted)
+      .sort((left, right) => compareRevision(right[1].created, left[1].created))[0];
+    if (!last) return;
+    const [id, stroke] = last;
+    strokesRef.current = { ...strokesRef.current, [id]: { ...stroke, deleted: true, points: [] } };
+    onStrokeChange(id, [], true);
+    const hasVisibleStrokes = Object.values(strokesRef.current).some((item) => !item.deleted);
+    setHasMarks(hasVisibleStrokes);
+    onUndoStateChange(hasVisibleStrokes);
     redraw();
   };
 
@@ -91,7 +131,7 @@ function DrawingPad({
       window.removeEventListener("clear-sketch", clear);
       window.removeEventListener("undo-sketch", undo);
     };
-  }, [onUndoStateChange, redraw]);
+  }, [onStrokeChange, onUndoStateChange, redraw]);
 
   return (
     <div className={`pad-shell ${className}`}>
@@ -103,18 +143,34 @@ function DrawingPad({
           event.preventDefault();
           if (event.button !== 0) return;
           event.currentTarget.setPointerCapture(event.pointerId);
-          activeStrokeRef.current = [pointFromEvent(event)];
+          activeStrokeRef.current = { id: crypto.randomUUID(), points: [pointFromEvent(event)] };
+          lastSyncAtRef.current = performance.now();
           redraw();
         }}
         onPointerMove={(event) => {
           if (!activeStrokeRef.current) return;
           event.preventDefault();
-          activeStrokeRef.current.push(pointFromEvent(event));
+          activeStrokeRef.current.points.push(pointFromEvent(event));
+          if (performance.now() - lastSyncAtRef.current >= 100) {
+            const { id, points } = activeStrokeRef.current;
+            onStrokeChange(id, [...points], false);
+            lastSyncAtRef.current = performance.now();
+          }
           redraw();
         }}
         onPointerUp={(event) => {
           if (!activeStrokeRef.current) return;
-          strokesRef.current = [...strokesRef.current, activeStrokeRef.current];
+          const { id, points } = activeStrokeRef.current;
+          onStrokeChange(id, [...points], false);
+          strokesRef.current = {
+            ...strokesRef.current,
+            [id]: {
+              points,
+              deleted: false,
+              revision: { counter: Date.now(), clientId: id },
+              created: { counter: Date.now(), clientId: id },
+            },
+          };
           activeStrokeRef.current = null;
           setHasMarks(true);
           onUndoStateChange(true);
@@ -122,7 +178,17 @@ function DrawingPad({
         }}
         onPointerCancel={() => {
           if (activeStrokeRef.current) {
-            strokesRef.current = [...strokesRef.current, activeStrokeRef.current];
+            const { id, points } = activeStrokeRef.current;
+            onStrokeChange(id, [...points], false);
+            strokesRef.current = {
+              ...strokesRef.current,
+              [id]: {
+                points,
+                deleted: false,
+                revision: { counter: Date.now(), clientId: id },
+                created: { counter: Date.now(), clientId: id },
+              },
+            };
             activeStrokeRef.current = null;
             setHasMarks(true);
             onUndoStateChange(true);
@@ -131,6 +197,14 @@ function DrawingPad({
         }}
         onContextMenu={(event) => event.preventDefault()}
         onDragStart={(event) => event.preventDefault()}
+        onLostPointerCapture={() => {
+          if (activeStrokeRef.current) {
+            const { id, points } = activeStrokeRef.current;
+            onStrokeChange(id, [...points], false);
+            activeStrokeRef.current = null;
+            redraw();
+          }
+        }}
       />
       {!hasMarks && <div className="pad-placeholder" aria-hidden="true">Write or draw here with Apple Pencil</div>}
     </div>
@@ -218,7 +292,7 @@ function ResponsePlot({ samples, driver, response }: { samples: Sample[]; driver
   const y = (value: number) => height - padding.bottom - ((value - yAxis.min) / (yAxis.max - yAxis.min)) * (height - padding.top - padding.bottom);
   const points = samples.map((sample) => `${x(sample.driver)},${y(sample.response)}`).join(" ");
   return (
-    <svg className="response-plot" viewBox={`0 0 ${width} ${height}`} preserveAspectRatio="none" role="img" aria-label={`${response} plotted against ${driver}`}>
+    <svg className="response-plot" viewBox={`0 0 ${width} ${height}`} role="img" aria-label={`${response} plotted against ${driver}`}>
       {xAxis.values.map((tick, index) => (
         <g key={`x-${index}`}>
           <line x1={x(tick)} y1={padding.top} x2={x(tick)} y2={height - padding.bottom} className="plot-grid" />
@@ -241,9 +315,12 @@ function ResponsePlot({ samples, driver, response }: { samples: Sample[]; driver
 }
 
 export default function Home() {
-  const [equationText, setEquationText] = useState("");
-  const [known, setKnown] = useState<Record<string, boolean>>({});
-  const [knownValues, setKnownValues] = useState<Record<string, string>>({});
+  const [boardDocument, setBoardDocument] = useState<BoardDocument>(createEmptyBoardDocument);
+  const [clientId, setClientId] = useState("");
+  const clientIdRef = useRef("");
+  const [roomId, setRoomId] = useState<string | null>(null);
+  const [roomInput, setRoomInput] = useState("");
+  const [shareMessage, setShareMessage] = useState("");
   const [result, setResult] = useState<SolveResult | null>(null);
   const [solveMessage, setSolveMessage] = useState("");
   const [driver, setDriver] = useState("");
@@ -255,6 +332,28 @@ export default function Home() {
   const [sweepMessage, setSweepMessage] = useState("");
   const [pwaMessage, setPwaMessage] = useState("");
   const [canUndoSketch, setCanUndoSketch] = useState(false);
+  const equationText = boardDocument.equationText.value;
+  const known = useMemo(
+    () => Object.fromEntries(Object.entries(boardDocument.known).map(([name, field]) => [name, field.value])),
+    [boardDocument.known],
+  );
+  const knownValues = useMemo(
+    () => Object.fromEntries(Object.entries(boardDocument.knownValues).map(([name, field]) => [name, field.value])),
+    [boardDocument.knownValues],
+  );
+  const sync = useBoardSync(roomId, clientId, boardDocument, setBoardDocument);
+
+  useEffect(() => {
+    const id = crypto.randomUUID();
+    clientIdRef.current = id;
+    setClientId(id);
+    const roomFromLink = new URLSearchParams(window.location.hash.slice(1)).get("board");
+    if (roomFromLink && /^[\da-f]{8}-(?:[\da-f]{4}-){3}[\da-f]{12}$/i.test(roomFromLink)) {
+      setRoomId(roomFromLink);
+      const saved = readStoredBoard(roomFromLink);
+      if (saved) setBoardDocument(saved);
+    }
+  }, []);
 
   useEffect(() => {
     if ("serviceWorker" in navigator && window.isSecureContext) {
@@ -346,11 +445,84 @@ export default function Home() {
   }, [samples]);
 
   const updateEquations = (value: string) => {
-    setEquationText(value);
+    setBoardDocument((current) => setEquationText(current, value, clientIdRef.current));
     setResult(null);
     setSamples(null);
-    setKnown({});
-    setKnownValues({});
+    setSolveMessage("");
+    setSweepMessage("");
+  };
+
+  const updateStroke = useCallback((id: string, points: Point[], deleted: boolean) => {
+    const currentClientId = clientIdRef.current;
+    if (!currentClientId) return;
+    setBoardDocument((current) => setStroke(current, id, points, deleted, currentClientId));
+  }, []);
+
+  const activateRoom = (id: string, restore = true) => {
+    if (restore) {
+      const saved = readStoredBoard(id);
+      setBoardDocument(saved ?? createEmptyBoardDocument());
+    }
+    setRoomId(id);
+    setShareMessage("");
+    window.history.replaceState(null, "", `${window.location.pathname}${window.location.search}#board=${id}`);
+  };
+
+  const createBoardLink = () => {
+    if (!boardSyncConfigured) {
+      setShareMessage("Live sharing is not configured on this deployment yet. Follow the Supabase setup in README.");
+      return;
+    }
+    activateRoom(crypto.randomUUID(), false);
+  };
+
+  const joinBoard = () => {
+    if (!boardSyncConfigured) {
+      setShareMessage("Live sharing is not configured on this deployment yet. Follow the Supabase setup in README.");
+      return;
+    }
+    let candidate = roomInput.trim();
+    try {
+      const url = new URL(candidate, window.location.origin);
+      candidate = new URLSearchParams(url.hash.slice(1)).get("board") ?? candidate;
+    } catch {
+      candidate = candidate.replace(/^#?board=/, "");
+    }
+    if (!/^[\da-f]{8}-(?:[\da-f]{4}-){3}[\da-f]{12}$/i.test(candidate)) {
+      setShareMessage("Paste a valid FBD Whiteboard share link or board ID.");
+      return;
+    }
+    activateRoom(candidate);
+  };
+
+  const copyBoardLink = async () => {
+    const link = `${window.location.origin}${window.location.pathname}${window.location.search}#board=${roomId}`;
+    try {
+      await navigator.clipboard.writeText(link);
+      setShareMessage("Share link copied.");
+    } catch {
+      setShareMessage("Copy was blocked. Select and copy the share link below.");
+    }
+  };
+
+  const leaveBoard = () => {
+    setRoomId(null);
+    setShareMessage("");
+    window.history.replaceState(null, "", `${window.location.pathname}${window.location.search}`);
+  };
+
+  const updateKnown = (name: string, value: boolean) => {
+    setBoardDocument((current) => setKnown(current, name, value, clientIdRef.current));
+    setResult(null);
+    setSamples(null);
+    setSolveMessage("");
+    setSweepMessage("");
+  };
+
+  const updateKnownValue = (name: string, value: string) => {
+    setBoardDocument((current) => setKnownValue(current, name, value, clientIdRef.current));
+    setResult(null);
+    setSamples(null);
     setSolveMessage("");
     setSweepMessage("");
   };
@@ -363,12 +535,44 @@ export default function Home() {
           <span>FBD <strong>Whiteboard</strong></span>
         </a>
         <div className="toolbar-actions">
-          <span className="local-indicator"><span /> Local</span>
+          <span className={`local-indicator sync-indicator sync-${sync.status}`} aria-live="polite">
+            <span />{sync.status === "connected" ? sync.deviceCount > 1 ? `${sync.deviceCount} devices` : "Sync ready" : sync.status === "connecting" ? "Connecting" : sync.status === "error" ? "Sync issue" : "Local"}
+          </span>
+          <details className="share-menu">
+            <summary>Share</summary>
+            <div className="share-popover">
+              <strong>{roomId ? "Shared board" : "Share this board"}</strong>
+              {!boardSyncConfigured && <p>Live sync needs a Supabase project. See the setup steps in README.</p>}
+              {roomId ? (
+                <>
+                  <p>{sync.status === "connected" ? sync.deviceCount > 1 ? `${sync.deviceCount} devices connected; changes sync live.` : "Sync service ready; open this link on another device." : "Board link ready. Waiting for sync service."} Anyone with the link can edit this board.</p>
+                  <label className="share-link-label" htmlFor="share-link">Invite link</label>
+                  <input id="share-link" className="share-link-input" readOnly value={`${typeof window === "undefined" ? "" : window.location.origin + window.location.pathname + window.location.search}#board=${roomId}`} onFocus={(event) => event.currentTarget.select()} />
+                  <div className="share-buttons">
+                    <button type="button" className="secondary-button" onClick={copyBoardLink}>Copy link</button>
+                    <button type="button" className="quiet-button" onClick={leaveBoard}>Leave room</button>
+                  </div>
+                </>
+              ) : (
+                <>
+                  <p>Generate a private link, then open it on your other device.</p>
+                  {boardSyncConfigured && <p>Sharing sends equations, known values, and sketch strokes to Supabase.</p>}
+                  <button type="button" className="secondary-button" disabled={!boardSyncConfigured} onClick={createBoardLink}>Create share link</button>
+                  <label className="share-link-label" htmlFor="join-board">Or join a board</label>
+                  <input id="join-board" className="share-link-input" value={roomInput} onChange={(event) => setRoomInput(event.target.value)} placeholder="Paste link or board ID" />
+                  <button type="button" className="quiet-button" disabled={!boardSyncConfigured} onClick={joinBoard}>Join board</button>
+                </>
+              )}
+              {(shareMessage || sync.error) && <p className={sync.error ? "share-error" : "share-message"} role={sync.error ? "alert" : "status"}>{sync.error || shareMessage}</p>}
+            </div>
+          </details>
           <details className="help-menu">
             <summary aria-label="Help" title="Help">?</summary>
             <div className="help-popover">
               <strong>Apple Pencil</strong>
               <p>Turn on Scribble in Settings → Apple Pencil. Write one equation per line, then check the text.</p>
+              <strong>Math input</strong>
+              <p>Use <code>sqrt(x)</code>, <code>abs(x)</code>, or <code>|x|</code>. Trig functions use degrees. Length values assume inches; keep units consistent.</p>
             </div>
           </details>
         </div>
@@ -385,7 +589,12 @@ export default function Home() {
               <button className="quiet-button" type="button" onClick={() => window.dispatchEvent(new Event("clear-sketch"))}>Clear</button>
             </div>
           </div>
-          <DrawingPad label="Free body diagram sketch pad" onUndoStateChange={setCanUndoSketch} />
+          <DrawingPad
+            label="Free body diagram sketch pad"
+            onUndoStateChange={setCanUndoSketch}
+            strokeRecords={boardDocument.strokes}
+            onStrokeChange={updateStroke}
+          />
         </section>
 
         <section className="board-pane math-pane" aria-label="Equations and solution">
@@ -436,13 +645,7 @@ export default function Home() {
                           <input
                             inputMode="decimal"
                             value={knownValues[name] ?? ""}
-                            onChange={(event) => {
-                              setKnownValues((previous) => ({ ...previous, [name]: event.target.value }));
-                              setResult(null);
-                              setSamples(null);
-                              setSolveMessage("");
-                              setSweepMessage("");
-                            }}
+                            onChange={(event) => updateKnownValue(name, event.target.value)}
                             placeholder="Value"
                           />
                         </label>
@@ -452,13 +655,7 @@ export default function Home() {
                         type="button"
                         aria-label={known[name] ? `Mark ${name} unknown` : `Mark ${name} known`}
                         aria-pressed={!!known[name]}
-                        onClick={() => {
-                          setKnown((previous) => ({ ...previous, [name]: !previous[name] }));
-                          setResult(null);
-                          setSamples(null);
-                          setSolveMessage("");
-                          setSweepMessage("");
-                        }}
+                        onClick={() => updateKnown(name, !known[name])}
                       >{known[name] ? "Known ✓" : "Set known"}</button>
                     </div>
                   ))}

@@ -1,8 +1,33 @@
 import { describe, expect, it } from "vitest";
-import { createBoardReport } from "./board-report";
+import { createBoardReport, findSketchBounds } from "./board-report";
 
 const onePixelPng = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4//8/AAX+Av4N70a4AAAAAElFTkSuQmCC";
 const bluePixelPng = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGNgYPgPAAEDAQAIicLsAAAAAElFTkSuQmCC";
+
+describe("findSketchBounds", () => {
+  it("frames the visible strokes with padding instead of the whole canvas", () => {
+    const width = 100;
+    const height = 80;
+    const data = new Uint8ClampedArray(width * height * 4);
+    for (const [x, y] of [[40, 30], [41, 30], [42, 31]]) data[(y * width + x) * 4 + 3] = 255;
+
+    expect(findSketchBounds({ width, height, data })).toEqual({ x: 34, y: 24, width: 15, height: 14 });
+  });
+
+  it("keeps marks at the canvas edge inside the crop", () => {
+    const width = 20;
+    const height = 12;
+    const data = new Uint8ClampedArray(width * height * 4);
+    data[3] = 255;
+    data[((height - 1) * width + width - 1) * 4 + 3] = 255;
+
+    expect(findSketchBounds({ width, height, data })).toEqual({ x: 0, y: 0, width, height });
+  });
+
+  it("returns no bounds for a blank sketch", () => {
+    expect(findSketchBounds({ width: 4, height: 3, data: new Uint8ClampedArray(4 * 3 * 4) })).toBeNull();
+  });
+});
 
 describe("createBoardReport", () => {
   it("creates a single-page PDF containing both report images", () => {

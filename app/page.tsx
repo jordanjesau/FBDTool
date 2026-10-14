@@ -567,7 +567,7 @@ export default function Home() {
     setReporting(true);
     setReportMessage("");
     try {
-      const { createBoardReport, svgToPng } = await import("../lib/board-report");
+      const { createBoardReport, cropSketchToPng, svgToPng } = await import("../lib/board-report");
       const canvas = reportCanvasRef.current;
       if (!canvas) throw new Error("The diagram is not ready to export. Try again.");
       let plotPng: string | undefined;
@@ -587,7 +587,7 @@ export default function Home() {
           value: known[name] ? knownValues[name] ?? "" : name in calculatedValues ? formatNumber(calculatedValues[name]) : "",
         })),
         ...(parsed.error ? { parseError: parsed.error } : {}),
-        sketchPng: canvas.toDataURL("image/png"),
+        sketchPng: cropSketchToPng(canvas),
         ...(lastPlot && plotPng ? {
           plot: {
             png: plotPng,

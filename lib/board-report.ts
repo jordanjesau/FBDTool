@@ -3,6 +3,7 @@ import { jsPDF } from "jspdf";
 export type ReportVariable = {
   name: string;
   known: boolean;
+  calculated?: boolean;
   value: string;
 };
 
@@ -37,6 +38,55 @@ function fitImage(
   const width = image.width * scale;
   const height = image.height * scale;
   doc.addImage(data, "PNG", box.x + (box.width - width) / 2, box.y + (box.height - height) / 2, width, height);
+}
+
+export type PixelBounds = { x: number; y: number; width: number; height: number };
+
+export function findSketchBounds(image: {
+  width: number;
+  height: number;
+  data: Uint8ClampedArray;
+}, paddingRatio = 0.08): PixelBounds | null {
+  let left = image.width;
+  let top = image.height;
+  let right = -1;
+  let bottom = -1;
+
+  for (let y = 0; y < image.height; y += 1) {
+    for (let x = 0; x < image.width; x += 1) {
+      if (image.data[(y * image.width + x) * 4 + 3] <= 8) continue;
+      left = Math.min(left, x);
+      top = Math.min(top, y);
+      right = Math.max(right, x);
+      bottom = Math.max(bottom, y);
+    }
+  }
+  if (right < left || bottom < top) return null;
+
+  const drawingWidth = right - left + 1;
+  const drawingHeight = bottom - top + 1;
+  const padding = Math.max(6, Math.ceil(Math.max(drawingWidth, drawingHeight) * paddingRatio));
+  const x = Math.max(0, left - padding);
+  const y = Math.max(0, top - padding);
+  const endX = Math.min(image.width, right + padding + 1);
+  const endY = Math.min(image.height, bottom + padding + 1);
+  return { x, y, width: endX - x, height: endY - y };
+}
+
+export function cropSketchToPng(canvas: HTMLCanvasElement): string {
+  const context = canvas.getContext("2d", { willReadFrequently: true });
+  if (!context) throw new Error("Could not read the diagram for the PDF.");
+
+  const bounds = findSketchBounds(context.getImageData(0, 0, canvas.width, canvas.height));
+  if (!bounds) return canvas.toDataURL("image/png");
+
+  const cropped = document.createElement("canvas");
+  cropped.width = bounds.width;
+  cropped.height = bounds.height;
+  const croppedContext = cropped.getContext("2d");
+  if (!croppedContext) throw new Error("Could not prepare the diagram for the PDF.");
+  croppedContext.drawImage(canvas, bounds.x, bounds.y, bounds.width, bounds.height, 0, 0, bounds.width, bounds.height);
+  return cropped.toDataURL("image/png");
 }
 
 function wrappedLines(doc: jsPDF, items: ReportLine[], width: number, fontSize: number) {
@@ -139,9 +189,11 @@ export function createBoardReport(report: BoardReport): jsPDF {
   drawFittingLines(doc, equationItems, margin, sectionsTop + 7, equationsWidth - 8, sectionBottom);
 
   const variableItems: ReportLine[] = report.variables.map((variable) => {
-    const color = variable.known ? green : magenta;
+    const color: ReportLine["color"] = variable.known ? green : variable.calculated ? [24, 90, 219] : magenta;
     const description = variable.known
       ? `${variable.name} = ${variable.value.trim() || "value not entered"} (known)`
+      : variable.calculated
+        ? `${variable.name} = ${variable.value.trim()} (calculated)`
       : `${variable.name} (unknown)`;
     return { text: description, color };
   });

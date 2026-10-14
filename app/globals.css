@@ -103,12 +103,14 @@ button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visib
 .equation-preview { margin: 1px 0 10px; padding: 6px 9px 7px; border: 1px solid #edf0f4; border-radius: 6px; background: #fcfdff; }
 .preview-title { display: flex; justify-content: flex-end; margin-bottom: 3px; color: var(--muted); font-size: 9px; }
 .preview-title > span { display: inline-flex; align-items: center; gap: 4px; }
-.known-key, .unknown-key { width: 7px; height: 7px; margin-left: 6px; border-radius: 50%; background: var(--green); }
+.known-key, .calculated-key, .unknown-key { width: 7px; height: 7px; margin-left: 6px; border-radius: 50%; background: var(--green); }
+.calculated-key { background: var(--blue); }
 .unknown-key { background: var(--magenta); }
 .preview-equation { min-height: 20px; display: flex; align-items: baseline; gap: 7px; }
 .equation-index { width: 12px; color: #8291a5; font-family: "SFMono-Regular", Consolas, monospace; font-size: 9px; text-align: right; }
 .highlighted-equation { color: #344962; font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace; font-size: 11px; overflow-wrap: anywhere; }
 .known-text { color: var(--green); }
+.calculated-text { color: var(--blue); }
 .unknown-text { color: var(--magenta); }
 .variable-section { margin: 5px 0 12px; }
 .subsection-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 5px; }
@@ -118,6 +120,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visib
 .variable-row { min-height: 42px; display: grid; grid-template-columns: minmax(36px, 1fr) minmax(58px, .9fr) auto; align-items: center; gap: 8px; border-bottom: 1px solid #edf0f4; }
 .variable-symbol { overflow: hidden; font-family: "SFMono-Regular", Consolas, monospace; font-size: 12px; text-overflow: ellipsis; }
 .variable-inferred { color: var(--magenta); font-size: 10px; }
+.calculated-value { overflow: hidden; color: var(--blue); font-family: "SFMono-Regular", Consolas, monospace; font-size: 11px; font-weight: 600; text-overflow: ellipsis; }
 .known-input-wrap input { width: 100%; min-width: 55px; height: 34px; padding: 0 7px; border: 1px solid #dce8e1; border-radius: 4px; background: #fff; color: var(--ink); font-size: 12px; }
 .known-toggle { min-width: 72px; min-height: 36px; padding: 0 9px; border: 1px solid #e0e7f0; border-radius: 5px; background: #fff; color: #586b84; font-size: 10px; cursor: pointer; white-space: nowrap; }
 .known-toggle[aria-pressed="true"] { border-color: #b9dfce; background: var(--green-soft); color: #277c59; }

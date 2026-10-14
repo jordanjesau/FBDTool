@@ -3,6 +3,7 @@ import { jsPDF } from "jspdf";
 export type ReportVariable = {
   name: string;
   known: boolean;
+  calculated?: boolean;
   value: string;
 };
 
@@ -139,9 +140,11 @@ export function createBoardReport(report: BoardReport): jsPDF {
   drawFittingLines(doc, equationItems, margin, sectionsTop + 7, equationsWidth - 8, sectionBottom);
 
   const variableItems: ReportLine[] = report.variables.map((variable) => {
-    const color = variable.known ? green : magenta;
+    const color: ReportLine["color"] = variable.known ? green : variable.calculated ? [24, 90, 219] : magenta;
     const description = variable.known
       ? `${variable.name} = ${variable.value.trim() || "value not entered"} (known)`
+      : variable.calculated
+        ? `${variable.name} = ${variable.value.trim()} (calculated)`
       : `${variable.name} (unknown)`;
     return { text: description, color };
   });

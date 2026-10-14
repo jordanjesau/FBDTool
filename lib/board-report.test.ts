@@ -13,6 +13,7 @@ describe("createBoardReport", () => {
       variables: [
         { name: "Fx", known: false, value: "" },
         { name: "m", known: true, value: "4.5" },
+        { name: "g", known: false, calculated: true, value: "14" },
       ],
       sketchPng: onePixelPng,
       plot: { png: bluePixelPng, driver: "x", response: "y" },
@@ -22,6 +23,7 @@ describe("createBoardReport", () => {
     const bytes = new Uint8Array(report.output("arraybuffer"));
     expect(new TextDecoder().decode(bytes.slice(0, 8))).toBe("%PDF-1.3");
     expect((report.output() as string).match(/\/Subtype\s*\/Image/g)).toHaveLength(2);
+    expect(report.output()).toContain("g = 14 \\(calculated\\)");
   });
 
   it("rejects content that cannot fit legibly on one page", () => {

@@ -14,6 +14,7 @@ import {
   setStroke,
 } from "../lib/board-document";
 import { boardSyncConfigured, readStoredBoard, useBoardSync } from "../lib/use-board-sync";
+import { calculateVariables } from "../lib/calculated-variables";
 
 type Point = BoardPoint;
 type Sample = { driver: number; response: number };
@@ -233,10 +234,11 @@ function axisTicks(min: number, max: number) {
   return { min: start, max: end === start ? start + step : end, values };
 }
 
-function HighlightedEquation({ equation, variables, known }: {
+function HighlightedEquation({ equation, variables, known, calculated }: {
   equation: string;
   variables: string[];
   known: Record<string, boolean>;
+  calculated: Record<string, number>;
 }) {
   const names = [...variables].sort((a, b) => b.length - a.length);
   const regex = names.length ? new RegExp(`(${names.map((name) => name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|")})`, "gu") : null;
@@ -244,7 +246,7 @@ function HighlightedEquation({ equation, variables, known }: {
   return (
     <code className="highlighted-equation">
       {parts.map((part, index) => variables.includes(part)
-        ? <span className={known[part] ? "known-text" : "unknown-text"} key={`${part}-${index}`}>{part}</span>
+        ? <span className={known[part] ? "known-text" : part in calculated ? "calculated-text" : "unknown-text"} key={`${part}-${index}`}>{part}</span>
         : <span key={`text-${index}`}>{part}</span>)}
     </code>
   );
@@ -387,11 +389,6 @@ export default function Home() {
     }
   }, [equationText]);
   const variables = useMemo(() => extractVariables(parsed.equations), [parsed.equations]);
-  const unknowns = variables.filter((name) => !known[name]);
-  const currentDriver = driver && unknowns.includes(driver) ? driver : unknowns[0] ?? "";
-  const currentResponse = response && unknowns.includes(response) && response !== currentDriver
-    ? response
-    : unknowns.find((name) => name !== currentDriver) ?? "";
   const knownNumericValues = useMemo(() => {
     const values: Record<string, number> = {};
     for (const name of variables) {
@@ -403,6 +400,19 @@ export default function Home() {
     }
     return values;
   }, [known, knownValues, variables]);
+  const calculatedValues = useMemo(
+    () => parsed.error ? {} : calculateVariables(parsed.equations, variables, knownNumericValues),
+    [knownNumericValues, parsed, variables],
+  );
+  const availableValues = useMemo(
+    () => knownNumericValues === null ? null : { ...knownNumericValues, ...calculatedValues },
+    [calculatedValues, knownNumericValues],
+  );
+  const unknowns = variables.filter((name) => !known[name] && !(name in calculatedValues));
+  const currentDriver = driver && unknowns.includes(driver) ? driver : unknowns[0] ?? "";
+  const currentResponse = response && unknowns.includes(response) && response !== currentDriver
+    ? response
+    : unknowns.find((name) => name !== currentDriver) ?? "";
   const enoughEquations = parsed.equations.length >= unknowns.length;
 
   const solve = () => {
@@ -413,11 +423,11 @@ export default function Home() {
       setSolveMessage(parsed.error || "Add at least one valid equation before solving.");
       return;
     }
-    if (knownNumericValues === null) {
+    if (availableValues === null) {
       setSolveMessage("Enter a finite numeric value for every variable marked known.");
       return;
     }
-    const solved = solveSystem(parsed.equations, unknowns, knownNumericValues);
+    const solved = solveSystem(parsed.equations, unknowns, availableValues);
     setResult(solved);
     if (!solved.ok) setSolveMessage(solved.message);
   };
@@ -425,7 +435,7 @@ export default function Home() {
   const runSweep = () => {
     setSamples(null);
     setSweepMessage("");
-    if (knownNumericValues === null) {
+    if (availableValues === null) {
       setSweepMessage("Enter a finite value for each known variable first.");
       return;
     }
@@ -444,7 +454,7 @@ export default function Home() {
       setSweepMessage("Choose between 2 and 101 samples.");
       return;
     }
-    const sweep = buildSamples(parsed.equations, unknowns, knownNumericValues, currentDriver, currentResponse, start, end, count);
+    const sweep = buildSamples(parsed.equations, unknowns, availableValues, currentDriver, currentResponse, start, end, count);
     if (!sweep.samples) {
       setSweepMessage(sweep.error ?? "The parameter sweep could not be computed.");
       return;
@@ -533,7 +543,12 @@ export default function Home() {
   };
 
   const updateKnown = (name: string, value: boolean) => {
-    setBoardDocument((current) => setKnown(current, name, value, clientIdRef.current));
+    setBoardDocument((current) => {
+      const updated = setKnown(current, name, value, clientIdRef.current);
+      return value && name in calculatedValues
+        ? setKnownValue(updated, name, String(calculatedValues[name]), clientIdRef.current)
+        : updated;
+    });
     setResult(null);
     setSamples(null);
     setSolveMessage("");
@@ -568,7 +583,8 @@ export default function Home() {
         variables: variables.map((name) => ({
           name,
           known: !!known[name],
-          value: knownValues[name] ?? "",
+          calculated: !known[name] && name in calculatedValues,
+          value: known[name] ? knownValues[name] ?? "" : name in calculatedValues ? formatNumber(calculatedValues[name]) : "",
         })),
         ...(parsed.error ? { parseError: parsed.error } : {}),
         sketchPng: canvas.toDataURL("image/png"),
@@ -688,11 +704,11 @@ export default function Home() {
             {parsed.error && <p className="inline-message error" role="alert">{parsed.error}</p>}
             {parsed.equations.length > 0 && !parsed.error && (
               <div className="equation-preview" aria-label="Equation variable highlighting">
-                <div className="preview-title"><span><i className="known-key" /> Known <i className="unknown-key" /> Unknown</span></div>
+                <div className="preview-title"><span><i className="known-key" /> Known <i className="calculated-key" /> Calculated <i className="unknown-key" /> Unknown</span></div>
                 {parsed.equations.map((equation, index) => (
                   <div className="preview-equation" key={`${index}-${equation.source}`}>
                     <span className="equation-index">{index + 1}</span>
-                    <HighlightedEquation equation={equation.source} variables={variables} known={known} />
+                    <HighlightedEquation equation={equation.source} variables={variables} known={known} calculated={calculatedValues} />
                   </div>
                 ))}
               </div>
@@ -706,8 +722,8 @@ export default function Home() {
                 </div>
                 <div className="variable-list">
                   {variables.map((name) => (
-                    <div className={`variable-row ${known[name] ? "known-row" : ""}`} key={name}>
-                      <span className={`variable-symbol ${known[name] ? "known-text" : "unknown-text"}`}>{name}</span>
+                    <div className={`variable-row ${known[name] ? "known-row" : name in calculatedValues ? "calculated-row" : ""}`} key={name}>
+                      <span className={`variable-symbol ${known[name] ? "known-text" : name in calculatedValues ? "calculated-text" : "unknown-text"}`}>{name}</span>
                       {known[name] ? (
                         <label className="known-input-wrap">
                           <span className="sr-only">{name} known value</span>
@@ -718,6 +734,10 @@ export default function Home() {
                             placeholder="Value"
                           />
                         </label>
+                      ) : name in calculatedValues ? (
+                        <span className="calculated-value" title="Calculated from the current equations and known values">
+                          {formatNumber(calculatedValues[name])}
+                        </span>
                       ) : <span className="variable-inferred">Unknown</span>}
                       <button
                         className="known-toggle"
@@ -738,8 +758,9 @@ export default function Home() {
                 <div className="result-heading"><span className="result-check">✓</span><strong>Solved</strong></div>
                 <div className="result-values">
                   {variables.map((name) => {
-                    const value = known[name] ? knownNumericValues?.[name] : result.values[name];
-                    return <div className="result-value" key={name}><span className={known[name] ? "known-text" : "unknown-text"}>{name}</span><strong>{value === undefined ? "—" : formatNumber(value)}</strong></div>;
+                    const value = known[name] ? knownNumericValues?.[name] : calculatedValues[name] ?? result.values[name];
+                    const valueClass = known[name] ? "known-text" : name in calculatedValues ? "calculated-text" : "unknown-text";
+                    return <div className="result-value" key={name}><span className={valueClass}>{name}</span><strong>{value === undefined ? "—" : formatNumber(value)}</strong></div>;
                   })}
                 </div>
               </div>

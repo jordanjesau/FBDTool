@@ -54,6 +54,8 @@ button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visib
 .brand-mark { display: grid; width: 25px; height: 25px; place-items: center; border-radius: 7px; background: var(--blue); color: #fff; font-size: 14px; font-weight: 800; }
 .brand strong { font-weight: 750; }
 .toolbar-actions { display: flex; align-items: center; gap: 14px; }
+.report-button { min-height: 32px; padding: 0 10px; border: 1px solid var(--line); border-radius: 6px; background: #fff; color: var(--ink); font-size: 11px; font-weight: 600; cursor: pointer; }
+.report-button:hover { border-color: #b8ccef; background: var(--blue-soft); color: var(--blue); }
 .local-indicator { display: inline-flex; align-items: center; gap: 7px; color: var(--muted); font-size: 10px; }
 .local-indicator span { width: 6px; height: 6px; border-radius: 50%; background: #35aa7a; }
 .sync-error span { background: var(--red); }
@@ -147,6 +149,19 @@ button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visib
 .plot-toolbar h2 { margin: 0; font-size: 16px; font-weight: 650; }
 .plot-close { min-height: 44px; padding: 0 16px; border: 1px solid #dbe5f4; border-radius: 6px; background: var(--blue-soft); color: var(--blue); font-size: 13px; font-weight: 600; cursor: pointer; }
 .plot-close:hover { border-color: #b8ccef; background: #e5edff; }
+.report-plot-source { position: fixed; top: 0; left: -12000px; width: 1200px; height: 760px; overflow: hidden; visibility: hidden; pointer-events: none; }
+.report-overlay { position: fixed; z-index: 20; inset: 0; display: grid; place-items: center; padding: 16px; background: rgba(23, 43, 77, .32); }
+.report-dialog { width: min(420px, 100%); display: grid; gap: 10px; padding: 20px; border: 1px solid var(--line); border-radius: 10px; background: #fff; box-shadow: 0 20px 56px rgba(23, 43, 77, .2); }
+.report-dialog-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; margin-bottom: 4px; }
+.report-dialog-heading h2 { margin: 0; font-size: 17px; }
+.report-dialog-heading p { margin: 5px 0 0; color: var(--muted); font-size: 12px; }
+.report-close { width: 36px; height: 36px; border: 0; border-radius: 6px; background: transparent; color: var(--muted); font-size: 24px; cursor: pointer; }
+.report-close:hover { background: #f2f5f9; }
+.report-title-label { color: var(--muted); font-size: 11px; font-weight: 600; }
+.report-title-input { width: 100%; min-height: 44px; padding: 0 11px; border: 1px solid #dfe6ef; border-radius: 6px; color: var(--ink); font-size: 14px; }
+.report-includes { margin: 0; color: var(--muted); font-size: 11px; line-height: 1.5; }
+.report-export { min-height: 44px; margin-top: 3px; }
+.report-dialog .inline-message { margin: 0; }
 .sample-table-wrap { max-height: 180px; overflow: auto; margin-top: 8px; border: 1px solid #e8edf3; border-radius: 6px; }
 .plot-table { flex: 0 0 auto; max-height: 23dvh; margin-top: 0; }
 table { width: 100%; border-collapse: collapse; text-align: left; }
@@ -168,6 +183,8 @@ tbody tr:last-child td { border-bottom: 0; }
 .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; }
 
 @media (max-width: 700px) {
+  .toolbar-actions { gap: 8px; }
+  .report-button { padding: 0 8px; font-size: 10px; }
   .board-split { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(180px, 42dvh) minmax(0, 1fr); }
   .math-pane { grid-template-rows: 38px auto minmax(0, 1fr) auto; padding: 0 10px; }
   .equation-editor { height: clamp(130px, 22dvh, 230px); min-height: 100px; font-size: 16px; }
@@ -183,7 +200,7 @@ tbody tr:last-child td { border-bottom: 0; }
   .known-toggle { min-width: 66px; padding: 0 6px; }
 }
 @media (pointer: coarse) {
-  .quiet-button, .known-toggle, .help-menu > summary, .share-menu > summary, .sweep-tools > summary, .plot-close { min-height: 44px; }
+  .quiet-button, .known-toggle, .help-menu > summary, .share-menu > summary, .sweep-tools > summary, .plot-close, .report-button { min-height: 44px; }
   .known-toggle { min-width: 72px; }
 }
 @media (prefers-reduced-motion: reduce) {

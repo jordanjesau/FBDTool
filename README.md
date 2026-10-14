@@ -1,6 +1,6 @@
 # FBD Equation Whiteboard
 
-A standalone, iPad-friendly workspace for free body diagram sketches, equation entry, linear-system solving, and parameter sweeps. All app features run in the browser; there is no paid OCR, Mathpix account, or API key.
+A standalone, iPad-friendly workspace for free body diagram sketches, equation entry, equation solving, and parameter sweeps. All app features run in the browser; there is no paid OCR, Mathpix account, or API key.
 
 ## Run locally
 
@@ -15,11 +15,11 @@ Open `http://localhost:3000`.
 
 ## Use on iPad
 
-1. Draw forces, supports, dimensions, and notes in the **Free body diagram** tab. The sketch stays in the browser and is never uploaded.
-2. In **Equations & solve**, tap the equation text field and either type or write equations with Apple Pencil using iPadOS Scribble. If needed, turn Scribble on in **Settings → Apple Pencil → Scribble**. Scribble converts handwriting into editable text on the iPad; this app does not perform handwriting-image OCR.
-3. Review the converted symbols and enter one equation per line, with exactly one `=` per equation. Supported syntax includes names such as `Fx`, `theta`, and `x_1`; arithmetic `+ - * / ^`; parentheses; and implicit multiplication such as `2x`. Equations must be linear in their variables. Unsupported nonlinear expressions, malformed input, and division by zero are reported instead of evaluated.
-4. Mark measured variables as **Known** and enter finite numeric values. A unique solution needs at least as many independent equations as remaining unknowns. Contradictory, underdetermined, and numerically ill-conditioned systems are reported rather than given invented results.
-5. For a parameter sweep, choose an unknown driving variable, an unknown response, a finite increasing range, and 2–101 samples. The app re-solves the remaining system at each sample and shows a plot and table.
+1. Draw forces, supports, dimensions, and notes in the **Diagram** pane; use **Undo** to remove the last stroke or **Clear** to erase the sketch. The sketch stays in the browser and is never uploaded.
+2. In the **Equations** pane, type or write equations with Apple Pencil using iPadOS Scribble. If needed, turn Scribble on in **Settings → Apple Pencil → Scribble**. Scribble converts handwriting into editable text on the iPad; this app does not perform handwriting-image OCR.
+3. Enter one equation per line, with exactly one `=` per equation. Names such as `Fx`, `theta`, and `x_1` are each a single variable. Supported syntax includes `+ - * / ^`, parentheses, implicit multiplication such as `2x`, and `sqrt`, `exp`, `ln`, `log`, `log10`, and common trigonometric and hyperbolic functions. The app solves linear systems directly and uses a numerical solver for nonlinear systems. Nonlinear solves can report multiple roots, non-convergence, or numerical instability instead of choosing an arbitrary answer.
+4. Mark measured variables as **Known** and enter finite numeric values. A unique solution needs at least as many equations as remaining unknowns. Contradictory, underdetermined, and numerically ill-conditioned systems are reported rather than given invented results.
+5. For a parameter sweep, choose an unknown driving variable, an unknown response, a finite increasing range, and 2–101 samples. The app re-solves the remaining system at each sample and opens a full-screen, gridded plot with axis ticks and a results table.
 
 This app has no subscription or paid recognition service. Scribble is an iPad feature; on desktop, type directly into the equation field. Solving, known-value tracking, plotting, and sweeps run locally. The sketch and equation text are not sent to an OCR provider.
 

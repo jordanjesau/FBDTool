@@ -65,14 +65,16 @@ button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visib
 .board-split { min-height: 0; display: grid; grid-template-columns: minmax(0, 1.08fr) minmax(330px, .92fr); gap: 1px; overflow: hidden; background: var(--line); }
 .board-pane { min-width: 0; min-height: 0; display: grid; background: #fff; }
 .sketch-pane { grid-template-rows: 38px minmax(0, 1fr); }
+.sketch-actions { display: flex; align-items: center; gap: 2px; }
 .math-pane { grid-template-rows: 38px minmax(210px, .9fr) minmax(120px, 1fr) auto; padding: 0 12px; }
 .pane-toolbar { min-width: 0; display: flex; align-items: center; justify-content: space-between; gap: 10px; border-bottom: 1px solid #edf0f4; }
 .pane-toolbar h1, .pane-toolbar h2 { margin: 0; font-size: 13px; font-weight: 650; letter-spacing: -.01em; }
 .equation-count { color: var(--muted); font-size: 10px; white-space: nowrap; }
 .quiet-button { min-width: 44px; min-height: 34px; padding: 0 9px; border: 0; border-radius: 5px; background: transparent; color: var(--muted); font-size: 11px; cursor: pointer; }
 .quiet-button:hover { background: #f2f5f9; color: var(--ink); }
+.quiet-button:disabled { color: #a1adbc; cursor: default; }
 .pad-shell { position: relative; min-height: 0; overflow: hidden; background-color: #fff; background-image: radial-gradient(#dce4ee 0.75px, transparent 0.75px); background-size: 22px 22px; }
-.drawing-canvas { position: absolute; inset: 0; width: 100%; height: 100%; touch-action: none; cursor: crosshair; }
+.drawing-canvas { position: absolute; inset: 0; width: 100%; height: 100%; touch-action: none; cursor: crosshair; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; -webkit-user-drag: none; }
 .pad-placeholder { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); color: #8391a4; font-size: 11px; text-align: center; pointer-events: none; }
 .equation-editor { width: 100%; height: 100%; min-height: 0; margin: 9px 0 8px; padding: 12px; resize: none; border: 1px solid #dfe6ef; border-radius: 6px; background: #fff; color: var(--ink); font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace; font-size: 14px; line-height: 1.55; }
 .equation-editor:focus { border-color: #8ba9e6; }
@@ -116,13 +118,19 @@ button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visib
 .range-controls { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: 8px; margin: 10px 0; }
 .secondary-button { width: 100%; border-color: #dbe5f4; background: var(--blue-soft); color: var(--blue); }
 .secondary-button:hover { border-color: #b8ccef; background: #e5edff; }
-.sweep-results { margin-top: 12px; }
-.response-plot { display: block; width: 100%; height: auto; overflow: visible; border: 1px solid #edf1f6; border-radius: 6px; background: #fff; }
+.response-plot { display: block; flex: 1 1 auto; width: 100%; height: 100%; min-height: 0; overflow: hidden; background: #fff; }
 .plot-axis { stroke: #b7c3d1; stroke-width: 1.2; }
-.plot-grid { stroke: #e8edf3; stroke-width: 1; stroke-dasharray: 3 4; }
+.plot-grid { stroke: #e1e7ef; stroke-width: 1; }
 .plot-line { fill: none; stroke: #3673dd; stroke-width: 3; stroke-linecap: round; stroke-linejoin: round; }
-.plot-label { fill: #65758a; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Arial, sans-serif; font-size: 10px; }
+.plot-label { fill: #52647c; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Arial, sans-serif; font-size: 18px; }
+.plot-axis-title { fill: #344962; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Arial, sans-serif; font-size: 22px; font-weight: 600; }
+.plot-dialog { position: fixed; z-index: 10; inset: 0; display: flex; flex-direction: column; gap: 8px; padding: max(8px, env(safe-area-inset-top)) max(10px, env(safe-area-inset-right)) max(8px, env(safe-area-inset-bottom)) max(10px, env(safe-area-inset-left)); background: #fff; }
+.plot-toolbar { flex: 0 0 auto; min-height: 48px; display: flex; align-items: center; justify-content: space-between; gap: 12px; border-bottom: 1px solid var(--line); }
+.plot-toolbar h2 { margin: 0; font-size: 16px; font-weight: 650; }
+.plot-close { min-height: 44px; padding: 0 16px; border: 1px solid #dbe5f4; border-radius: 6px; background: var(--blue-soft); color: var(--blue); font-size: 13px; font-weight: 600; cursor: pointer; }
+.plot-close:hover { border-color: #b8ccef; background: #e5edff; }
 .sample-table-wrap { max-height: 180px; overflow: auto; margin-top: 8px; border: 1px solid #e8edf3; border-radius: 6px; }
+.plot-table { flex: 0 0 auto; max-height: 23dvh; margin-top: 0; }
 table { width: 100%; border-collapse: collapse; text-align: left; }
 th, td { padding: 7px 9px; border-bottom: 1px solid #edf1f6; font-family: "SFMono-Regular", Consolas, monospace; font-size: 10px; }
 th { position: sticky; top: 0; background: #f7f9fc; color: #64738a; font-weight: 500; }
@@ -156,7 +164,7 @@ tbody tr:last-child td { border-bottom: 0; }
   .known-toggle { min-width: 66px; padding: 0 6px; }
 }
 @media (pointer: coarse) {
-  .quiet-button, .known-toggle, .help-menu > summary, .sweep-tools > summary { min-height: 44px; }
+  .quiet-button, .known-toggle, .help-menu > summary, .sweep-tools > summary, .plot-close { min-height: 44px; }
   .known-toggle { min-width: 72px; }
 }
 @media (prefers-reduced-motion: reduce) {

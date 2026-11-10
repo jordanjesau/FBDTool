@@ -2,8 +2,8 @@ export type Revision = { counter: number; clientId: string };
 export type Versioned<T> = { value: T; revision: Revision };
 export type BoardPoint = { x: number; y: number; pressure: number };
 export type BoardPenColor = "navy" | "red" | "blue" | "green";
-export type BoardStrokeMode = "freehand" | "straight" | "circle" | "arrow" | "eraser";
-export type BoardStrokeStyle = { color: BoardPenColor; mode: BoardStrokeMode };
+export type BoardStrokeMode = "freehand" | "straight" | "circle" | "arrow" | "eraser" | "dimension" | "text";
+export type BoardStrokeStyle = { color: BoardPenColor; mode: BoardStrokeMode; label?: string };
 export type BoardStroke = {
   points: BoardPoint[];
   deleted: boolean;
@@ -11,6 +11,7 @@ export type BoardStroke = {
   created: Revision;
   color?: BoardPenColor;
   mode?: BoardStrokeMode;
+  label?: string;
 };
 export type BoardDocument = {
   version: 1;
@@ -79,6 +80,7 @@ export function setStroke(
         created: previous?.created ?? revision,
         ...((style?.color ?? previous?.color) ? { color: style?.color ?? previous?.color } : {}),
         ...((style?.mode ?? previous?.mode) ? { mode: style?.mode ?? previous?.mode } : {}),
+        ...((style?.label ?? previous?.label) !== undefined ? { label: style?.label ?? previous?.label } : {}),
       },
     },
   };
@@ -153,7 +155,8 @@ export function isBoardDocument(value: unknown): value is BoardDocument {
       const record = stroke as BoardStroke;
       return typeof record.deleted === "boolean"
         && (record.color === undefined || ["navy", "red", "blue", "green"].includes(record.color))
-        && (record.mode === undefined || ["freehand", "straight", "circle", "arrow", "eraser"].includes(record.mode))
+        && (record.mode === undefined || ["freehand", "straight", "circle", "arrow", "eraser", "dimension", "text"].includes(record.mode))
+        && (record.label === undefined || typeof record.label === "string" && record.label.length <= 200)
         && Array.isArray(record.points)
         && record.points.length <= 12000
         && record.points.every((point) => !!point

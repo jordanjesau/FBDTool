@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useId, useMemo, useRef, useState, type PointerEvent, type Ref, type RefObject } from "react";
+import { useCallback, useEffect, useId, useMemo, useRef, useState, type FormEvent, type PointerEvent, type Ref, type RefObject } from "react";
 import { extractVariables, LinearEquation, MathInputError, parseEquations, solveSystem, SolveResult } from "../lib/math";
 import {
   BoardDocument,
@@ -25,15 +25,80 @@ type Sample = { driver: number; response: number };
 type PlotBounds = { minX: number; maxX: number; minY: number; maxY: number };
 type PlotBoundDraft = { [Key in keyof PlotBounds]: string };
 type LastPlot = { samples: Sample[]; driver: string; response: string; bounds: PlotBounds };
+type DrawingTool = BoardStrokeMode | "select";
 
 const penColors: Array<{ id: BoardPenColor; label: string; value: string }> = [
-  { id: "navy", label: "Navy", value: "#172b4d" },
-  { id: "red", label: "Red", value: "#d84646" },
-  { id: "blue", label: "Blue", value: "#185adb" },
-  { id: "green", label: "Green", value: "#18845b" },
+  { id: "navy", label: "Charcoal", value: "#333333" },
+  { id: "red", label: "Red", value: "#c2242a" },
+  { id: "blue", label: "Slate", value: "#536675" },
+  { id: "green", label: "Gold", value: "#806800" },
 ];
 
 const penColorValues = Object.fromEntries(penColors.map((color) => [color.id, color.value])) as Record<BoardPenColor, string>;
+
+function distanceFromSegment(x: number, y: number, x1: number, y1: number, x2: number, y2: number): number {
+  const lengthSquared = (x2 - x1) ** 2 + (y2 - y1) ** 2;
+  const ratio = lengthSquared === 0
+    ? 0
+    : Math.max(0, Math.min(1, ((x - x1) * (x2 - x1) + (y - y1) * (y2 - y1)) / lengthSquared));
+  return Math.hypot(x - (x1 + ratio * (x2 - x1)), y - (y1 + ratio * (y2 - y1)));
+}
+
+function findStrokeAtPoint(
+  point: Point,
+  strokes: Record<string, BoardStroke>,
+  width: number,
+  height: number,
+): string | null {
+  const x = point.x * width;
+  const y = point.y * height;
+  let nearestId: string | null = null;
+  let nearestDistance = 22;
+  const orderedStrokes = Object.entries(strokes)
+    .filter(([, stroke]) => !stroke.deleted && stroke.points.length > 0)
+    .sort((left, right) => compareRevision(right[1].created, left[1].created));
+
+  for (const [id, stroke] of orderedStrokes) {
+    const first = stroke.points[0];
+    const last = stroke.points[stroke.points.length - 1];
+    let distance = Number.POSITIVE_INFINITY;
+    if (stroke.label) {
+      const labelX = (stroke.mode === "dimension" ? (first.x + last.x) / 2 : first.x) * width;
+      const labelY = (stroke.mode === "dimension" ? (first.y + last.y) / 2 : first.y) * height;
+      const halfWidth = Math.max(18, stroke.label.length * 4.5);
+      if (Math.abs(x - labelX) <= halfWidth + 8 && Math.abs(y - labelY) <= 16) distance = 0;
+    }
+    if (stroke.mode === "circle") {
+      distance = Math.min(distance, Math.abs(
+        Math.hypot(x - first.x * width, y - first.y * height)
+        - Math.hypot((last.x - first.x) * width, (last.y - first.y) * height),
+      ));
+    } else {
+      const points = stroke.mode === "straight" || stroke.mode === "arrow" || stroke.mode === "dimension"
+        ? [first, last]
+        : stroke.points;
+      if (points.length === 1) {
+        distance = Math.min(distance, Math.hypot(x - first.x * width, y - first.y * height));
+      } else {
+        for (let index = 1; index < points.length; index += 1) {
+          distance = Math.min(distance, distanceFromSegment(
+            x,
+            y,
+            points[index - 1].x * width,
+            points[index - 1].y * height,
+            points[index].x * width,
+            points[index].y * height,
+          ));
+        }
+      }
+    }
+    if (distance < nearestDistance) {
+      nearestDistance = distance;
+      nearestId = id;
+    }
+  }
+  return nearestId;
+}
 
 function DrawingPad({
   label,
@@ -53,14 +118,19 @@ function DrawingPad({
   reportCanvasRef: RefObject<HTMLCanvasElement | null>;
   penColor: BoardPenColor;
   onPenColorChange: (color: BoardPenColor) => void;
-  strokeMode: BoardStrokeMode;
-  onStrokeModeChange: (mode: BoardStrokeMode) => void;
+  strokeMode: DrawingTool;
+  onStrokeModeChange: (mode: DrawingTool) => void;
 }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const strokesRef = useRef(strokeRecords);
-  const activeStrokeRef = useRef<{ id: string; points: Point[]; color: BoardPenColor; mode: BoardStrokeMode } | null>(null);
+  const activeStrokeRef = useRef<{ id: string; points: Point[]; color: BoardPenColor; mode: BoardStrokeMode; label?: string } | null>(null);
+  const selectedStrokeRef = useRef<string | null>(null);
+  const labelInputRef = useRef<HTMLInputElement>(null);
   const lastSyncAtRef = useRef(0);
   const [hasMarks, setHasMarks] = useState(false);
+  const [selectedStrokeId, setSelectedStrokeId] = useState<string | null>(null);
+  const [editingLabel, setEditingLabel] = useState<{ id: string; point: Point; isNew: boolean } | null>(null);
+  const [labelDraft, setLabelDraft] = useState("");
 
   const redraw = useCallback(() => {
     const canvas = canvasRef.current;
@@ -70,13 +140,13 @@ function DrawingPad({
     context.lineCap = "round";
     context.lineJoin = "round";
     const strokes = [
-      ...Object.values(strokesRef.current)
-        .filter((stroke) => !stroke.deleted)
-        .sort((left, right) => compareRevision(left.created, right.created))
-        .map((stroke) => stroke),
-      ...(activeStrokeRef.current ? [activeStrokeRef.current] : []),
+      ...Object.entries(strokesRef.current)
+        .filter(([, stroke]) => !stroke.deleted)
+        .sort((left, right) => compareRevision(left[1].created, right[1].created))
+        .map(([id, stroke]) => ({ id, stroke })),
+      ...(activeStrokeRef.current ? [{ id: activeStrokeRef.current.id, stroke: activeStrokeRef.current }] : []),
     ];
-    for (const stroke of strokes) {
+    for (const { id, stroke } of strokes) {
       if (stroke.points.length === 0) continue;
       const first = stroke.points[0];
       const last = stroke.points[stroke.points.length - 1];
@@ -105,14 +175,72 @@ function DrawingPad({
         context.lineTo(endX - headLength * Math.cos(angle - headAngle), endY - headLength * Math.sin(angle - headAngle));
         context.moveTo(endX, endY);
         context.lineTo(endX - headLength * Math.cos(angle + headAngle), endY - headLength * Math.sin(angle + headAngle));
-      } else {
+      } else if (stroke.mode === "dimension") {
+        const angle = Math.atan2(endY - startY, endX - startX);
+        const length = Math.hypot(endX - startX, endY - startY);
+        const headLength = Math.min(12 * pixelRatio, length * 0.3);
+        const headAngle = Math.PI / 7;
+        const normalX = -Math.sin(angle) * 7 * pixelRatio;
+        const normalY = Math.cos(angle) * 7 * pixelRatio;
+        context.moveTo(startX + normalX, startY + normalY);
+        context.lineTo(startX - normalX, startY - normalY);
+        context.moveTo(endX + normalX, endY + normalY);
+        context.lineTo(endX - normalX, endY - normalY);
+        context.moveTo(startX, startY);
+        context.lineTo(endX, endY);
+        context.moveTo(startX, startY);
+        context.lineTo(startX + headLength * Math.cos(angle - headAngle), startY + headLength * Math.sin(angle - headAngle));
+        context.moveTo(startX, startY);
+        context.lineTo(startX + headLength * Math.cos(angle + headAngle), startY + headLength * Math.sin(angle + headAngle));
+        context.moveTo(endX, endY);
+        context.lineTo(endX - headLength * Math.cos(angle - headAngle), endY - headLength * Math.sin(angle - headAngle));
+        context.moveTo(endX, endY);
+        context.lineTo(endX - headLength * Math.cos(angle + headAngle), endY - headLength * Math.sin(angle + headAngle));
+      } else if (stroke.mode !== "text") {
         context.moveTo(startX, startY);
         const points = stroke.mode === "straight" ? [last] : stroke.points.slice(1);
         for (const point of points) {
           context.lineTo(point.x * canvas.width, point.y * canvas.height);
         }
       }
-      context.stroke();
+      if (stroke.mode !== "text") context.stroke();
+      if (stroke.label) {
+        const labelX = stroke.mode === "dimension" ? (startX + endX) / 2 : startX;
+        const labelY = stroke.mode === "dimension" ? (startY + endY) / 2 : startY;
+        context.save();
+        context.font = `600 ${14 * pixelRatio}px -apple-system, BlinkMacSystemFont, "Segoe UI", Arial, sans-serif`;
+        context.textAlign = "center";
+        context.textBaseline = "middle";
+        const labelWidth = context.measureText(stroke.label).width;
+        context.fillStyle = "#efeeeb";
+        context.fillRect(labelX - labelWidth / 2 - 5 * pixelRatio, labelY - 11 * pixelRatio, labelWidth + 10 * pixelRatio, 22 * pixelRatio);
+        context.fillStyle = penColorValues[stroke.color ?? "navy"];
+        context.fillText(stroke.label, labelX, labelY);
+        context.restore();
+      }
+      if (selectedStrokeRef.current === id) {
+        context.save();
+        context.globalCompositeOperation = "source-over";
+        context.strokeStyle = "#c2242a";
+        context.lineWidth = 2 * pixelRatio;
+        context.setLineDash([5 * pixelRatio, 4 * pixelRatio]);
+        const xValues = stroke.points.map((point) => point.x * canvas.width);
+        const yValues = stroke.points.map((point) => point.y * canvas.height);
+        if (stroke.label) {
+          context.font = `600 ${14 * pixelRatio}px -apple-system, BlinkMacSystemFont, "Segoe UI", Arial, sans-serif`;
+          const labelWidth = context.measureText(stroke.label).width;
+          const labelX = stroke.mode === "dimension" ? (startX + endX) / 2 : startX;
+          const labelY = stroke.mode === "dimension" ? (startY + endY) / 2 : startY;
+          xValues.push(labelX - labelWidth / 2, labelX + labelWidth / 2);
+          yValues.push(labelY - 12 * pixelRatio, labelY + 12 * pixelRatio);
+        }
+        const left = Math.min(...xValues) - 8 * pixelRatio;
+        const top = Math.min(...yValues) - 8 * pixelRatio;
+        const boxWidth = Math.max(24 * pixelRatio, Math.max(...xValues) - Math.min(...xValues) + 16 * pixelRatio);
+        const boxHeight = Math.max(24 * pixelRatio, Math.max(...yValues) - Math.min(...yValues) + 16 * pixelRatio);
+        context.strokeRect(left, top, boxWidth, boxHeight);
+        context.restore();
+      }
     }
   }, []);
 
@@ -149,18 +277,21 @@ function DrawingPad({
     };
   };
 
-  const clear = () => {
+  const clear = useCallback(() => {
     const removedStrokes = Object.entries(strokesRef.current).filter(([, stroke]) => !stroke.deleted);
     strokesRef.current = Object.fromEntries(
       Object.entries(strokesRef.current).map(([id, stroke]) => [id, { ...stroke, deleted: true, points: [] }]),
     );
     for (const [id] of removedStrokes) onStrokeChange(id, [], true);
     activeStrokeRef.current = null;
+    selectedStrokeRef.current = null;
+    setSelectedStrokeId(null);
+    setEditingLabel(null);
     setHasMarks(false);
     redraw();
-  };
+  }, [onStrokeChange, redraw]);
 
-  const undo = () => {
+  const undo = useCallback(() => {
     const last = Object.entries(strokesRef.current)
       .filter(([, stroke]) => !stroke.deleted)
       .sort((left, right) => compareRevision(right[1].created, left[1].created))[0];
@@ -168,10 +299,15 @@ function DrawingPad({
     const [id, stroke] = last;
     strokesRef.current = { ...strokesRef.current, [id]: { ...stroke, deleted: true, points: [] } };
     onStrokeChange(id, [], true);
+    if (selectedStrokeRef.current === id) {
+      selectedStrokeRef.current = null;
+      setSelectedStrokeId(null);
+    }
+    if (editingLabel?.id === id) setEditingLabel(null);
     const hasVisibleStrokes = Object.values(strokesRef.current).some((item) => !item.deleted);
     setHasMarks(hasVisibleStrokes);
     redraw();
-  };
+  }, [editingLabel?.id, onStrokeChange, redraw]);
 
   useEffect(() => {
     window.addEventListener("clear-sketch", clear);
@@ -180,7 +316,71 @@ function DrawingPad({
       window.removeEventListener("clear-sketch", clear);
       window.removeEventListener("undo-sketch", undo);
     };
+  }, [clear, undo]);
+
+  useEffect(() => {
+    if (editingLabel) labelInputRef.current?.focus();
+  }, [editingLabel]);
+
+  const saveLabel = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const label = labelDraft.trim();
+    if (!editingLabel || !label) return;
+    const stroke = strokesRef.current[editingLabel.id];
+    if (!stroke) return;
+    const color = stroke.color ?? "navy";
+    if (stroke.mode !== "dimension" && stroke.mode !== "text") return;
+    const mode = stroke.mode;
+    strokesRef.current = { ...strokesRef.current, [editingLabel.id]: { ...stroke, label } };
+    onStrokeChange(editingLabel.id, stroke.points, false, { color, mode, label });
+    selectedStrokeRef.current = editingLabel.id;
+    setSelectedStrokeId(editingLabel.id);
+    setEditingLabel(null);
+    redraw();
+  };
+
+  const cancelLabel = () => {
+    if (editingLabel?.isNew) {
+      const stroke = strokesRef.current[editingLabel.id];
+      if (stroke) {
+        strokesRef.current = { ...strokesRef.current, [editingLabel.id]: { ...stroke, deleted: true, points: [] } };
+        onStrokeChange(editingLabel.id, [], true);
+      }
+      selectedStrokeRef.current = null;
+      setSelectedStrokeId(null);
+      setHasMarks(Object.values(strokesRef.current).some((stroke) => !stroke.deleted));
+    }
+    setEditingLabel(null);
+    redraw();
+  };
+
+  const deleteSelected = useCallback(() => {
+    const id = selectedStrokeRef.current;
+    const stroke = id ? strokesRef.current[id] : undefined;
+    if (!id || !stroke || stroke.deleted) return;
+    strokesRef.current = { ...strokesRef.current, [id]: { ...stroke, deleted: true, points: [] } };
+    onStrokeChange(id, [], true);
+    selectedStrokeRef.current = null;
+    setSelectedStrokeId(null);
+    setEditingLabel(null);
+    setHasMarks(Object.values(strokesRef.current).some((item) => !item.deleted));
+    redraw();
   }, [onStrokeChange, redraw]);
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Backspace" && event.key !== "Delete") return;
+      if (event.target instanceof HTMLElement && ["INPUT", "TEXTAREA"].includes(event.target.tagName)) return;
+      if (!selectedStrokeRef.current) return;
+      event.preventDefault();
+      deleteSelected();
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [deleteSelected]);
+
+  const selectedStroke = selectedStrokeId ? strokeRecords[selectedStrokeId] : undefined;
+  const selectedIsAnnotation = selectedStroke?.mode === "dimension" || selectedStroke?.mode === "text";
 
   return (
     <>
@@ -205,8 +405,33 @@ function DrawingPad({
             <button className="pen-mode-button" type="button" title="Straight line" aria-label="Straight line" aria-pressed={strokeMode === "straight"} onClick={() => onStrokeModeChange("straight")}>Line</button>
             <button className="pen-mode-button" type="button" title="Circle" aria-label="Circle" aria-pressed={strokeMode === "circle"} onClick={() => onStrokeModeChange("circle")}>Circle</button>
             <button className="pen-mode-button" type="button" title="Arrow" aria-label="Arrow" aria-pressed={strokeMode === "arrow"} onClick={() => onStrokeModeChange("arrow")}>Arrow</button>
+            <button className="pen-mode-button" type="button" title="Dimension" aria-label="Dimension" aria-pressed={strokeMode === "dimension"} onClick={() => onStrokeModeChange("dimension")}>Dim</button>
+            <button className="pen-mode-button" type="button" title="Text box" aria-label="Text box" aria-pressed={strokeMode === "text"} onClick={() => onStrokeModeChange("text")}>Text</button>
+            <button className="pen-mode-button" type="button" title="Select and edit marks" aria-label="Select and edit marks" aria-pressed={strokeMode === "select"} onClick={() => onStrokeModeChange("select")}>Select</button>
             <button className="pen-mode-button" type="button" title="Eraser" aria-label="Eraser" aria-pressed={strokeMode === "eraser"} onClick={() => onStrokeModeChange("eraser")}>Erase</button>
           </div>
+          {selectedStroke && !selectedStroke.deleted && (
+            <div className="selection-actions" role="group" aria-label="Selected mark actions">
+              <span aria-live="polite">Mark selected</span>
+              {selectedIsAnnotation && (
+                <button className="quiet-button" type="button" onClick={() => {
+                  const selectedId = selectedStrokeId;
+                  if (!selectedId || selectedStroke.points.length === 0) return;
+                  const first = selectedStroke.points[0];
+                  const last = selectedStroke.points[selectedStroke.points.length - 1] ?? first;
+                  setLabelDraft(selectedStroke.label ?? "");
+                  setEditingLabel({
+                    id: selectedId,
+                    point: selectedStroke.mode === "dimension"
+                      ? { x: (first.x + last.x) / 2, y: (first.y + last.y) / 2, pressure: 0.5 }
+                      : first,
+                    isNew: false,
+                  });
+                }}>Edit label</button>
+              )}
+              <button className="quiet-button" type="button" onClick={deleteSelected}>Delete selected</button>
+            </div>
+          )}
           <button className="quiet-button" type="button" disabled={!hasMarks} onClick={() => window.dispatchEvent(new Event("undo-sketch"))}>Undo</button>
           <button className="quiet-button" type="button" onClick={() => window.dispatchEvent(new Event("clear-sketch"))}>Clear</button>
         </div>
@@ -222,6 +447,15 @@ function DrawingPad({
           onPointerDown={(event) => {
             event.preventDefault();
             if (event.button !== 0) return;
+            if (strokeMode === "select") {
+              const rect = event.currentTarget.getBoundingClientRect();
+              const id = findStrokeAtPoint(pointFromEvent(event), strokesRef.current, rect.width, rect.height);
+              selectedStrokeRef.current = id;
+              setSelectedStrokeId(id);
+              setEditingLabel(null);
+              redraw();
+              return;
+            }
             event.currentTarget.setPointerCapture(event.pointerId);
             activeStrokeRef.current = {
               id: crypto.randomUUID(),
@@ -237,12 +471,13 @@ function DrawingPad({
             if (!activeStroke) return;
             event.preventDefault();
             const point = pointFromEvent(event);
-            if (activeStroke.mode === "straight") {
+            if (activeStroke.mode === "straight" || activeStroke.mode === "dimension") {
               activeStroke.points = [activeStroke.points[0], point];
-            } else {
+            } else if (activeStroke.mode !== "text") {
               activeStroke.points.push(point);
             }
-            if (performance.now() - lastSyncAtRef.current >= 100) {
+            if (activeStroke.mode !== "dimension" && activeStroke.mode !== "text"
+              && performance.now() - lastSyncAtRef.current >= 100) {
               const { id, points, color, mode } = activeStroke;
               onStrokeChange(id, [...points], false, { color, mode });
               lastSyncAtRef.current = performance.now();
@@ -253,13 +488,36 @@ function DrawingPad({
             const activeStroke = activeStrokeRef.current;
             if (!activeStroke) return;
             const endPoint = pointFromEvent(event);
-            if (activeStroke.mode === "straight") {
+            if (activeStroke.mode === "straight" || activeStroke.mode === "dimension") {
               activeStroke.points = [activeStroke.points[0], endPoint];
-            } else {
+            } else if (activeStroke.mode !== "text") {
               const lastPoint = activeStroke.points[activeStroke.points.length - 1];
               if (lastPoint.x !== endPoint.x || lastPoint.y !== endPoint.y) activeStroke.points.push(endPoint);
             }
             const { id, points, color, mode } = activeStroke;
+            if (mode === "dimension" || mode === "text") {
+              const revision = { counter: Date.now(), clientId: id };
+              const labelPoint = mode === "dimension"
+                ? {
+                  x: (points[0].x + points[points.length - 1].x) / 2,
+                  y: (points[0].y + points[points.length - 1].y) / 2,
+                  pressure: 0.5,
+                }
+                : points[0];
+              onStrokeChange(id, [...points], false, { color, mode, label: "" });
+              strokesRef.current = {
+                ...strokesRef.current,
+                [id]: { points, deleted: false, color, mode, label: "", revision, created: revision },
+              };
+              activeStrokeRef.current = null;
+              selectedStrokeRef.current = id;
+              setSelectedStrokeId(id);
+              setLabelDraft("");
+              setEditingLabel({ id, point: labelPoint, isNew: true });
+              setHasMarks(true);
+              redraw();
+              return;
+            }
             onStrokeChange(id, [...points], false, { color, mode });
             strokesRef.current = {
               ...strokesRef.current,
@@ -279,6 +537,11 @@ function DrawingPad({
           onPointerCancel={() => {
             const activeStroke = activeStrokeRef.current;
             if (!activeStroke) return;
+            if (activeStroke.mode === "dimension" || activeStroke.mode === "text") {
+              activeStrokeRef.current = null;
+              redraw();
+              return;
+            }
             const { id, points, color, mode } = activeStroke;
             onStrokeChange(id, [...points], false, { color, mode });
             strokesRef.current = {
@@ -301,6 +564,11 @@ function DrawingPad({
           onLostPointerCapture={() => {
             if (activeStrokeRef.current) {
               const { id, points, color, mode } = activeStrokeRef.current;
+              if (mode === "dimension" || mode === "text") {
+                activeStrokeRef.current = null;
+                redraw();
+                return;
+              }
               onStrokeChange(id, [...points], false, { color, mode });
               strokesRef.current = {
                 ...strokesRef.current,
@@ -320,6 +588,34 @@ function DrawingPad({
           }}
         />
         {!hasMarks && <div className="pad-placeholder" aria-hidden="true">Write or draw here with Apple Pencil</div>}
+        {editingLabel && (
+          <form
+            className="annotation-editor"
+            style={{
+              left: `${Math.max(20, Math.min(80, editingLabel.point.x * 100))}%`,
+              top: `${editingLabel.point.y * 100}%`,
+              transform: editingLabel.point.y < 0.25 ? "translate(-50%, 10px)" : undefined,
+            }}
+            onSubmit={saveLabel}
+          >
+            <label className="sr-only" htmlFor="annotation-label">
+              {strokesRef.current[editingLabel.id]?.mode === "dimension" ? "Dimension value" : "Text label"}
+            </label>
+            <input
+              ref={labelInputRef}
+              id="annotation-label"
+              autoComplete="off"
+              maxLength={strokesRef.current[editingLabel.id]?.mode === "dimension" ? 40 : 120}
+              inputMode={strokesRef.current[editingLabel.id]?.mode === "dimension" ? "decimal" : "text"}
+              placeholder={strokesRef.current[editingLabel.id]?.mode === "dimension" ? "Enter dimension" : "Enter label"}
+              value={labelDraft}
+              onChange={(event) => setLabelDraft(event.target.value)}
+              required
+            />
+            <button className="solve-button" type="submit" disabled={!labelDraft.trim()}>Save</button>
+            <button className="quiet-button" type="button" onClick={cancelLabel}>Cancel</button>
+          </form>
+        )}
       </div>
     </>
   );
@@ -500,7 +796,7 @@ export default function Home() {
   const [sweepMessage, setSweepMessage] = useState("");
   const [pwaMessage, setPwaMessage] = useState("");
   const [penColor, setPenColor] = useState<BoardPenColor>("navy");
-  const [strokeMode, setStrokeMode] = useState<BoardStrokeMode>("freehand");
+  const [strokeMode, setStrokeMode] = useState<DrawingTool>("freehand");
   const [reportOpen, setReportOpen] = useState(false);
   const [projectTitle, setProjectTitle] = useState("");
   const [reportMessage, setReportMessage] = useState("");
@@ -803,10 +1099,15 @@ export default function Home() {
   return (
     <main className="whiteboard">
       <header className="board-toolbar">
-        <a className="brand" href="/" aria-label="FBD Whiteboard">
-          <span className="brand-mark">F</span>
-          <span>FBD <strong>Whiteboard</strong></span>
-        </a>
+        <div className="brand-group">
+          <a className="brand" href="/" aria-label="FBD Whiteboard">
+            <span className="brand-mark" aria-hidden="true">F</span>
+            <span>FBD <strong>Whiteboard</strong></span>
+          </a>
+          <span className="brand-logo">
+            <img src="/vaderstad-logo.svg" alt="Väderstad" />
+          </span>
+        </div>
         <div className="toolbar-actions">
           <button className="report-button" type="button" onClick={() => { setReportMessage(""); setReportOpen(true); }}>PDF report</button>
           <span className={`local-indicator sync-indicator sync-${sync.status}`} aria-live="polite">

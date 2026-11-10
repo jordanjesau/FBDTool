@@ -106,4 +106,73 @@ describe("shared board document", () => {
       mode: "straight",
     });
   });
+
+  it("persists editable dimension and text labels with their selected colors", () => {
+    const dimensionId = "00000000-0000-4000-8000-000000000006";
+    const textId = "00000000-0000-4000-8000-000000000007";
+    const dimension = setStroke(
+      createEmptyBoardDocument(),
+      dimensionId,
+      [{ x: 0.2, y: 0.4, pressure: 0.5 }, { x: 0.8, y: 0.4, pressure: 0.5 }],
+      false,
+      "ipad",
+      { color: "red", mode: "dimension", label: "120 mm" },
+    );
+    const text = setStroke(
+      dimension,
+      textId,
+      [{ x: 0.5, y: 0.6, pressure: 0.5 }],
+      false,
+      "ipad",
+      { color: "green", mode: "text", label: "Point A" },
+    );
+    const edited = setStroke(
+      text,
+      dimensionId,
+      dimension.strokes[dimensionId].points,
+      false,
+      "ipad",
+      { color: "blue", mode: "dimension", label: "125 mm" },
+    );
+    const deleted = setStroke(edited, textId, [], true, "ipad");
+
+    expect(isBoardDocument(edited)).toBe(true);
+    expect(edited.strokes[dimensionId]).toMatchObject({ color: "blue", mode: "dimension", label: "125 mm" });
+    expect(edited.strokes[textId]).toMatchObject({ color: "green", mode: "text", label: "Point A" });
+    expect(mergeBoardDocuments(createEmptyBoardDocument(), edited).strokes[dimensionId]?.label).toBe("125 mm");
+    expect(deleted.strokes[textId]).toMatchObject({ deleted: true, label: "Point A", color: "green" });
+  });
+
+  it("rejects unknown annotation modes and oversized labels", () => {
+    const valid = createEmptyBoardDocument();
+    const annotation = setStroke(
+      valid,
+      "00000000-0000-4000-8000-000000000008",
+      [{ x: 0.2, y: 0.4, pressure: 0.5 }],
+      false,
+      "ipad",
+      { color: "navy", mode: "text", label: "A" },
+    );
+
+    expect(isBoardDocument({
+      ...annotation,
+      strokes: {
+        ...annotation.strokes,
+        "00000000-0000-4000-8000-000000000008": {
+          ...annotation.strokes["00000000-0000-4000-8000-000000000008"],
+          mode: "select",
+        },
+      },
+    })).toBe(false);
+    expect(isBoardDocument({
+      ...annotation,
+      strokes: {
+        ...annotation.strokes,
+        "00000000-0000-4000-8000-000000000008": {
+          ...annotation.strokes["00000000-0000-4000-8000-000000000008"],
+          label: "x".repeat(201),
+        },
+      },
+    })).toBe(false);
+  });
 });

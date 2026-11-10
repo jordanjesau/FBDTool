@@ -5,8 +5,8 @@
   "description": "A free iPad-friendly free body diagram and equation-solving workspace with Apple Pencil Scribble input.",
   "start_url": "/",
   "display": "standalone",
-  "background_color": "#f4f7fb",
-  "theme_color": "#f4f7fb",
+  "background_color": "#efeeeb",
+  "theme_color": "#333333",
   "orientation": "any",
   "icons": [
     {

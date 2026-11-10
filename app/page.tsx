@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useId, useMemo, useRef, useState, type PointerEvent, type Ref, type RefObject } from "react";
+import { useCallback, useEffect, useId, useMemo, useRef, useState, type ChangeEvent, type FormEvent, type PointerEvent, type Ref, type RefObject } from "react";
 import { extractVariables, LinearEquation, MathInputError, parseEquations, solveSystem, SolveResult } from "../lib/math";
 import {
   BoardDocument,
@@ -19,21 +19,98 @@ import {
 import { boardSyncConfigured, readStoredBoard, useBoardSync } from "../lib/use-board-sync";
 import { calculateVariables } from "../lib/calculated-variables";
 import { validateAxisRange } from "../lib/plot-range";
+import {
+  activateLocalProject,
+  createLocalProject,
+  deleteLocalProject,
+  loadProjectLibrary,
+  parseProjectFile,
+  ProjectLibrary,
+  ProjectStorageMode,
+  renameLocalProject,
+  saveLocalProject,
+  serializeProjectFile,
+} from "../lib/project-storage";
 
 type Point = BoardPoint;
 type Sample = { driver: number; response: number };
 type PlotBounds = { minX: number; maxX: number; minY: number; maxY: number };
 type PlotBoundDraft = { [Key in keyof PlotBounds]: string };
 type LastPlot = { samples: Sample[]; driver: string; response: string; bounds: PlotBounds };
+type DrawingTool = BoardStrokeMode | "select";
 
 const penColors: Array<{ id: BoardPenColor; label: string; value: string }> = [
-  { id: "navy", label: "Navy", value: "#172b4d" },
-  { id: "red", label: "Red", value: "#d84646" },
-  { id: "blue", label: "Blue", value: "#185adb" },
-  { id: "green", label: "Green", value: "#18845b" },
+  { id: "navy", label: "Charcoal", value: "#333333" },
+  { id: "red", label: "Red", value: "#c2242a" },
+  { id: "blue", label: "Slate", value: "#536675" },
+  { id: "green", label: "Gold", value: "#806800" },
 ];
 
 const penColorValues = Object.fromEntries(penColors.map((color) => [color.id, color.value])) as Record<BoardPenColor, string>;
+
+function distanceFromSegment(x: number, y: number, x1: number, y1: number, x2: number, y2: number): number {
+  const lengthSquared = (x2 - x1) ** 2 + (y2 - y1) ** 2;
+  const ratio = lengthSquared === 0
+    ? 0
+    : Math.max(0, Math.min(1, ((x - x1) * (x2 - x1) + (y - y1) * (y2 - y1)) / lengthSquared));
+  return Math.hypot(x - (x1 + ratio * (x2 - x1)), y - (y1 + ratio * (y2 - y1)));
+}
+
+function findStrokeAtPoint(
+  point: Point,
+  strokes: Record<string, BoardStroke>,
+  width: number,
+  height: number,
+): string | null {
+  const x = point.x * width;
+  const y = point.y * height;
+  let nearestId: string | null = null;
+  let nearestDistance = 22;
+  const orderedStrokes = Object.entries(strokes)
+    .filter(([, stroke]) => !stroke.deleted && stroke.points.length > 0)
+    .sort((left, right) => compareRevision(right[1].created, left[1].created));
+
+  for (const [id, stroke] of orderedStrokes) {
+    const first = stroke.points[0];
+    const last = stroke.points[stroke.points.length - 1];
+    let distance = Number.POSITIVE_INFINITY;
+    if (stroke.label) {
+      const labelX = (stroke.mode === "dimension" ? (first.x + last.x) / 2 : first.x) * width;
+      const labelY = (stroke.mode === "dimension" ? (first.y + last.y) / 2 : first.y) * height;
+      const halfWidth = Math.max(18, stroke.label.length * 4.5);
+      if (Math.abs(x - labelX) <= halfWidth + 8 && Math.abs(y - labelY) <= 16) distance = 0;
+    }
+    if (stroke.mode === "circle") {
+      distance = Math.min(distance, Math.abs(
+        Math.hypot(x - first.x * width, y - first.y * height)
+        - Math.hypot((last.x - first.x) * width, (last.y - first.y) * height),
+      ));
+    } else {
+      const points = stroke.mode === "straight" || stroke.mode === "arrow" || stroke.mode === "dimension"
+        ? [first, last]
+        : stroke.points;
+      if (points.length === 1) {
+        distance = Math.min(distance, Math.hypot(x - first.x * width, y - first.y * height));
+      } else {
+        for (let index = 1; index < points.length; index += 1) {
+          distance = Math.min(distance, distanceFromSegment(
+            x,
+            y,
+            points[index - 1].x * width,
+            points[index - 1].y * height,
+            points[index].x * width,
+            points[index].y * height,
+          ));
+        }
+      }
+    }
+    if (distance < nearestDistance) {
+      nearestDistance = distance;
+      nearestId = id;
+    }
+  }
+  return nearestId;
+}
 
 function DrawingPad({
   label,
@@ -53,14 +130,19 @@ function DrawingPad({
   reportCanvasRef: RefObject<HTMLCanvasElement | null>;
   penColor: BoardPenColor;
   onPenColorChange: (color: BoardPenColor) => void;
-  strokeMode: BoardStrokeMode;
-  onStrokeModeChange: (mode: BoardStrokeMode) => void;
+  strokeMode: DrawingTool;
+  onStrokeModeChange: (mode: DrawingTool) => void;
 }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const strokesRef = useRef(strokeRecords);
-  const activeStrokeRef = useRef<{ id: string; points: Point[]; color: BoardPenColor; mode: BoardStrokeMode } | null>(null);
+  const activeStrokeRef = useRef<{ id: string; points: Point[]; color: BoardPenColor; mode: BoardStrokeMode; label?: string } | null>(null);
+  const selectedStrokeRef = useRef<string | null>(null);
+  const labelInputRef = useRef<HTMLInputElement>(null);
   const lastSyncAtRef = useRef(0);
   const [hasMarks, setHasMarks] = useState(false);
+  const [selectedStrokeId, setSelectedStrokeId] = useState<string | null>(null);
+  const [editingLabel, setEditingLabel] = useState<{ id: string; point: Point; isNew: boolean } | null>(null);
+  const [labelDraft, setLabelDraft] = useState("");
 
   const redraw = useCallback(() => {
     const canvas = canvasRef.current;
@@ -70,13 +152,13 @@ function DrawingPad({
     context.lineCap = "round";
     context.lineJoin = "round";
     const strokes = [
-      ...Object.values(strokesRef.current)
-        .filter((stroke) => !stroke.deleted)
-        .sort((left, right) => compareRevision(left.created, right.created))
-        .map((stroke) => stroke),
-      ...(activeStrokeRef.current ? [activeStrokeRef.current] : []),
+      ...Object.entries(strokesRef.current)
+        .filter(([, stroke]) => !stroke.deleted)
+        .sort((left, right) => compareRevision(left[1].created, right[1].created))
+        .map(([id, stroke]) => ({ id, stroke })),
+      ...(activeStrokeRef.current ? [{ id: activeStrokeRef.current.id, stroke: activeStrokeRef.current }] : []),
     ];
-    for (const stroke of strokes) {
+    for (const { id, stroke } of strokes) {
       if (stroke.points.length === 0) continue;
       const first = stroke.points[0];
       const last = stroke.points[stroke.points.length - 1];
@@ -105,14 +187,72 @@ function DrawingPad({
         context.lineTo(endX - headLength * Math.cos(angle - headAngle), endY - headLength * Math.sin(angle - headAngle));
         context.moveTo(endX, endY);
         context.lineTo(endX - headLength * Math.cos(angle + headAngle), endY - headLength * Math.sin(angle + headAngle));
-      } else {
+      } else if (stroke.mode === "dimension") {
+        const angle = Math.atan2(endY - startY, endX - startX);
+        const length = Math.hypot(endX - startX, endY - startY);
+        const headLength = Math.min(12 * pixelRatio, length * 0.3);
+        const headAngle = Math.PI / 7;
+        const normalX = -Math.sin(angle) * 7 * pixelRatio;
+        const normalY = Math.cos(angle) * 7 * pixelRatio;
+        context.moveTo(startX + normalX, startY + normalY);
+        context.lineTo(startX - normalX, startY - normalY);
+        context.moveTo(endX + normalX, endY + normalY);
+        context.lineTo(endX - normalX, endY - normalY);
+        context.moveTo(startX, startY);
+        context.lineTo(endX, endY);
+        context.moveTo(startX, startY);
+        context.lineTo(startX + headLength * Math.cos(angle - headAngle), startY + headLength * Math.sin(angle - headAngle));
+        context.moveTo(startX, startY);
+        context.lineTo(startX + headLength * Math.cos(angle + headAngle), startY + headLength * Math.sin(angle + headAngle));
+        context.moveTo(endX, endY);
+        context.lineTo(endX - headLength * Math.cos(angle - headAngle), endY - headLength * Math.sin(angle - headAngle));
+        context.moveTo(endX, endY);
+        context.lineTo(endX - headLength * Math.cos(angle + headAngle), endY - headLength * Math.sin(angle + headAngle));
+      } else if (stroke.mode !== "text") {
         context.moveTo(startX, startY);
         const points = stroke.mode === "straight" ? [last] : stroke.points.slice(1);
         for (const point of points) {
           context.lineTo(point.x * canvas.width, point.y * canvas.height);
         }
       }
-      context.stroke();
+      if (stroke.mode !== "text") context.stroke();
+      if (stroke.label) {
+        const labelX = stroke.mode === "dimension" ? (startX + endX) / 2 : startX;
+        const labelY = stroke.mode === "dimension" ? (startY + endY) / 2 : startY;
+        context.save();
+        context.font = `600 ${14 * pixelRatio}px -apple-system, BlinkMacSystemFont, "Segoe UI", Arial, sans-serif`;
+        context.textAlign = "center";
+        context.textBaseline = "middle";
+        const labelWidth = context.measureText(stroke.label).width;
+        context.fillStyle = "#efeeeb";
+        context.fillRect(labelX - labelWidth / 2 - 5 * pixelRatio, labelY - 11 * pixelRatio, labelWidth + 10 * pixelRatio, 22 * pixelRatio);
+        context.fillStyle = penColorValues[stroke.color ?? "navy"];
+        context.fillText(stroke.label, labelX, labelY);
+        context.restore();
+      }
+      if (selectedStrokeRef.current === id) {
+        context.save();
+        context.globalCompositeOperation = "source-over";
+        context.strokeStyle = "#c2242a";
+        context.lineWidth = 2 * pixelRatio;
+        context.setLineDash([5 * pixelRatio, 4 * pixelRatio]);
+        const xValues = stroke.points.map((point) => point.x * canvas.width);
+        const yValues = stroke.points.map((point) => point.y * canvas.height);
+        if (stroke.label) {
+          context.font = `600 ${14 * pixelRatio}px -apple-system, BlinkMacSystemFont, "Segoe UI", Arial, sans-serif`;
+          const labelWidth = context.measureText(stroke.label).width;
+          const labelX = stroke.mode === "dimension" ? (startX + endX) / 2 : startX;
+          const labelY = stroke.mode === "dimension" ? (startY + endY) / 2 : startY;
+          xValues.push(labelX - labelWidth / 2, labelX + labelWidth / 2);
+          yValues.push(labelY - 12 * pixelRatio, labelY + 12 * pixelRatio);
+        }
+        const left = Math.min(...xValues) - 8 * pixelRatio;
+        const top = Math.min(...yValues) - 8 * pixelRatio;
+        const boxWidth = Math.max(24 * pixelRatio, Math.max(...xValues) - Math.min(...xValues) + 16 * pixelRatio);
+        const boxHeight = Math.max(24 * pixelRatio, Math.max(...yValues) - Math.min(...yValues) + 16 * pixelRatio);
+        context.strokeRect(left, top, boxWidth, boxHeight);
+        context.restore();
+      }
     }
   }, []);
 
@@ -149,18 +289,21 @@ function DrawingPad({
     };
   };
 
-  const clear = () => {
+  const clear = useCallback(() => {
     const removedStrokes = Object.entries(strokesRef.current).filter(([, stroke]) => !stroke.deleted);
     strokesRef.current = Object.fromEntries(
       Object.entries(strokesRef.current).map(([id, stroke]) => [id, { ...stroke, deleted: true, points: [] }]),
     );
     for (const [id] of removedStrokes) onStrokeChange(id, [], true);
     activeStrokeRef.current = null;
+    selectedStrokeRef.current = null;
+    setSelectedStrokeId(null);
+    setEditingLabel(null);
     setHasMarks(false);
     redraw();
-  };
+  }, [onStrokeChange, redraw]);
 
-  const undo = () => {
+  const undo = useCallback(() => {
     const last = Object.entries(strokesRef.current)
       .filter(([, stroke]) => !stroke.deleted)
       .sort((left, right) => compareRevision(right[1].created, left[1].created))[0];
@@ -168,10 +311,15 @@ function DrawingPad({
     const [id, stroke] = last;
     strokesRef.current = { ...strokesRef.current, [id]: { ...stroke, deleted: true, points: [] } };
     onStrokeChange(id, [], true);
+    if (selectedStrokeRef.current === id) {
+      selectedStrokeRef.current = null;
+      setSelectedStrokeId(null);
+    }
+    if (editingLabel?.id === id) setEditingLabel(null);
     const hasVisibleStrokes = Object.values(strokesRef.current).some((item) => !item.deleted);
     setHasMarks(hasVisibleStrokes);
     redraw();
-  };
+  }, [editingLabel?.id, onStrokeChange, redraw]);
 
   useEffect(() => {
     window.addEventListener("clear-sketch", clear);
@@ -180,7 +328,71 @@ function DrawingPad({
       window.removeEventListener("clear-sketch", clear);
       window.removeEventListener("undo-sketch", undo);
     };
+  }, [clear, undo]);
+
+  useEffect(() => {
+    if (editingLabel) labelInputRef.current?.focus();
+  }, [editingLabel]);
+
+  const saveLabel = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const label = labelDraft.trim();
+    if (!editingLabel || !label) return;
+    const stroke = strokesRef.current[editingLabel.id];
+    if (!stroke) return;
+    const color = stroke.color ?? "navy";
+    if (stroke.mode !== "dimension" && stroke.mode !== "text") return;
+    const mode = stroke.mode;
+    strokesRef.current = { ...strokesRef.current, [editingLabel.id]: { ...stroke, label } };
+    onStrokeChange(editingLabel.id, stroke.points, false, { color, mode, label });
+    selectedStrokeRef.current = editingLabel.id;
+    setSelectedStrokeId(editingLabel.id);
+    setEditingLabel(null);
+    redraw();
+  };
+
+  const cancelLabel = () => {
+    if (editingLabel?.isNew) {
+      const stroke = strokesRef.current[editingLabel.id];
+      if (stroke) {
+        strokesRef.current = { ...strokesRef.current, [editingLabel.id]: { ...stroke, deleted: true, points: [] } };
+        onStrokeChange(editingLabel.id, [], true);
+      }
+      selectedStrokeRef.current = null;
+      setSelectedStrokeId(null);
+      setHasMarks(Object.values(strokesRef.current).some((stroke) => !stroke.deleted));
+    }
+    setEditingLabel(null);
+    redraw();
+  };
+
+  const deleteSelected = useCallback(() => {
+    const id = selectedStrokeRef.current;
+    const stroke = id ? strokesRef.current[id] : undefined;
+    if (!id || !stroke || stroke.deleted) return;
+    strokesRef.current = { ...strokesRef.current, [id]: { ...stroke, deleted: true, points: [] } };
+    onStrokeChange(id, [], true);
+    selectedStrokeRef.current = null;
+    setSelectedStrokeId(null);
+    setEditingLabel(null);
+    setHasMarks(Object.values(strokesRef.current).some((item) => !item.deleted));
+    redraw();
   }, [onStrokeChange, redraw]);
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Backspace" && event.key !== "Delete") return;
+      if (event.target instanceof HTMLElement && ["INPUT", "TEXTAREA"].includes(event.target.tagName)) return;
+      if (!selectedStrokeRef.current) return;
+      event.preventDefault();
+      deleteSelected();
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [deleteSelected]);
+
+  const selectedStroke = selectedStrokeId ? strokeRecords[selectedStrokeId] : undefined;
+  const selectedIsAnnotation = selectedStroke?.mode === "dimension" || selectedStroke?.mode === "text";
 
   return (
     <>
@@ -205,8 +417,33 @@ function DrawingPad({
             <button className="pen-mode-button" type="button" title="Straight line" aria-label="Straight line" aria-pressed={strokeMode === "straight"} onClick={() => onStrokeModeChange("straight")}>Line</button>
             <button className="pen-mode-button" type="button" title="Circle" aria-label="Circle" aria-pressed={strokeMode === "circle"} onClick={() => onStrokeModeChange("circle")}>Circle</button>
             <button className="pen-mode-button" type="button" title="Arrow" aria-label="Arrow" aria-pressed={strokeMode === "arrow"} onClick={() => onStrokeModeChange("arrow")}>Arrow</button>
+            <button className="pen-mode-button" type="button" title="Dimension" aria-label="Dimension" aria-pressed={strokeMode === "dimension"} onClick={() => onStrokeModeChange("dimension")}>Dim</button>
+            <button className="pen-mode-button" type="button" title="Text box" aria-label="Text box" aria-pressed={strokeMode === "text"} onClick={() => onStrokeModeChange("text")}>Text</button>
+            <button className="pen-mode-button" type="button" title="Select and edit marks" aria-label="Select and edit marks" aria-pressed={strokeMode === "select"} onClick={() => onStrokeModeChange("select")}>Select</button>
             <button className="pen-mode-button" type="button" title="Eraser" aria-label="Eraser" aria-pressed={strokeMode === "eraser"} onClick={() => onStrokeModeChange("eraser")}>Erase</button>
           </div>
+          {selectedStroke && !selectedStroke.deleted && (
+            <div className="selection-actions" role="group" aria-label="Selected mark actions">
+              <span aria-live="polite">Mark selected</span>
+              {selectedIsAnnotation && (
+                <button className="quiet-button" type="button" onClick={() => {
+                  const selectedId = selectedStrokeId;
+                  if (!selectedId || selectedStroke.points.length === 0) return;
+                  const first = selectedStroke.points[0];
+                  const last = selectedStroke.points[selectedStroke.points.length - 1] ?? first;
+                  setLabelDraft(selectedStroke.label ?? "");
+                  setEditingLabel({
+                    id: selectedId,
+                    point: selectedStroke.mode === "dimension"
+                      ? { x: (first.x + last.x) / 2, y: (first.y + last.y) / 2, pressure: 0.5 }
+                      : first,
+                    isNew: false,
+                  });
+                }}>Edit label</button>
+              )}
+              <button className="quiet-button" type="button" onClick={deleteSelected}>Delete selected</button>
+            </div>
+          )}
           <button className="quiet-button" type="button" disabled={!hasMarks} onClick={() => window.dispatchEvent(new Event("undo-sketch"))}>Undo</button>
           <button className="quiet-button" type="button" onClick={() => window.dispatchEvent(new Event("clear-sketch"))}>Clear</button>
         </div>
@@ -222,6 +459,15 @@ function DrawingPad({
           onPointerDown={(event) => {
             event.preventDefault();
             if (event.button !== 0) return;
+            if (strokeMode === "select") {
+              const rect = event.currentTarget.getBoundingClientRect();
+              const id = findStrokeAtPoint(pointFromEvent(event), strokesRef.current, rect.width, rect.height);
+              selectedStrokeRef.current = id;
+              setSelectedStrokeId(id);
+              setEditingLabel(null);
+              redraw();
+              return;
+            }
             event.currentTarget.setPointerCapture(event.pointerId);
             activeStrokeRef.current = {
               id: crypto.randomUUID(),
@@ -237,12 +483,13 @@ function DrawingPad({
             if (!activeStroke) return;
             event.preventDefault();
             const point = pointFromEvent(event);
-            if (activeStroke.mode === "straight") {
+            if (activeStroke.mode === "straight" || activeStroke.mode === "dimension") {
               activeStroke.points = [activeStroke.points[0], point];
-            } else {
+            } else if (activeStroke.mode !== "text") {
               activeStroke.points.push(point);
             }
-            if (performance.now() - lastSyncAtRef.current >= 100) {
+            if (activeStroke.mode !== "dimension" && activeStroke.mode !== "text"
+              && performance.now() - lastSyncAtRef.current >= 100) {
               const { id, points, color, mode } = activeStroke;
               onStrokeChange(id, [...points], false, { color, mode });
               lastSyncAtRef.current = performance.now();
@@ -253,13 +500,36 @@ function DrawingPad({
             const activeStroke = activeStrokeRef.current;
             if (!activeStroke) return;
             const endPoint = pointFromEvent(event);
-            if (activeStroke.mode === "straight") {
+            if (activeStroke.mode === "straight" || activeStroke.mode === "dimension") {
               activeStroke.points = [activeStroke.points[0], endPoint];
-            } else {
+            } else if (activeStroke.mode !== "text") {
               const lastPoint = activeStroke.points[activeStroke.points.length - 1];
               if (lastPoint.x !== endPoint.x || lastPoint.y !== endPoint.y) activeStroke.points.push(endPoint);
             }
             const { id, points, color, mode } = activeStroke;
+            if (mode === "dimension" || mode === "text") {
+              const revision = { counter: Date.now(), clientId: id };
+              const labelPoint = mode === "dimension"
+                ? {
+                  x: (points[0].x + points[points.length - 1].x) / 2,
+                  y: (points[0].y + points[points.length - 1].y) / 2,
+                  pressure: 0.5,
+                }
+                : points[0];
+              onStrokeChange(id, [...points], false, { color, mode, label: "" });
+              strokesRef.current = {
+                ...strokesRef.current,
+                [id]: { points, deleted: false, color, mode, label: "", revision, created: revision },
+              };
+              activeStrokeRef.current = null;
+              selectedStrokeRef.current = id;
+              setSelectedStrokeId(id);
+              setLabelDraft("");
+              setEditingLabel({ id, point: labelPoint, isNew: true });
+              setHasMarks(true);
+              redraw();
+              return;
+            }
             onStrokeChange(id, [...points], false, { color, mode });
             strokesRef.current = {
               ...strokesRef.current,
@@ -279,6 +549,11 @@ function DrawingPad({
           onPointerCancel={() => {
             const activeStroke = activeStrokeRef.current;
             if (!activeStroke) return;
+            if (activeStroke.mode === "dimension" || activeStroke.mode === "text") {
+              activeStrokeRef.current = null;
+              redraw();
+              return;
+            }
             const { id, points, color, mode } = activeStroke;
             onStrokeChange(id, [...points], false, { color, mode });
             strokesRef.current = {
@@ -301,6 +576,11 @@ function DrawingPad({
           onLostPointerCapture={() => {
             if (activeStrokeRef.current) {
               const { id, points, color, mode } = activeStrokeRef.current;
+              if (mode === "dimension" || mode === "text") {
+                activeStrokeRef.current = null;
+                redraw();
+                return;
+              }
               onStrokeChange(id, [...points], false, { color, mode });
               strokesRef.current = {
                 ...strokesRef.current,
@@ -320,6 +600,34 @@ function DrawingPad({
           }}
         />
         {!hasMarks && <div className="pad-placeholder" aria-hidden="true">Write or draw here with Apple Pencil</div>}
+        {editingLabel && (
+          <form
+            className="annotation-editor"
+            style={{
+              left: `${Math.max(20, Math.min(80, editingLabel.point.x * 100))}%`,
+              top: `${editingLabel.point.y * 100}%`,
+              transform: editingLabel.point.y < 0.25 ? "translate(-50%, 10px)" : undefined,
+            }}
+            onSubmit={saveLabel}
+          >
+            <label className="sr-only" htmlFor="annotation-label">
+              {strokesRef.current[editingLabel.id]?.mode === "dimension" ? "Dimension value" : "Text label"}
+            </label>
+            <input
+              ref={labelInputRef}
+              id="annotation-label"
+              autoComplete="off"
+              maxLength={strokesRef.current[editingLabel.id]?.mode === "dimension" ? 40 : 120}
+              inputMode={strokesRef.current[editingLabel.id]?.mode === "dimension" ? "decimal" : "text"}
+              placeholder={strokesRef.current[editingLabel.id]?.mode === "dimension" ? "Enter dimension" : "Enter label"}
+              value={labelDraft}
+              onChange={(event) => setLabelDraft(event.target.value)}
+              required
+            />
+            <button className="solve-button" type="submit" disabled={!labelDraft.trim()}>Save</button>
+            <button className="quiet-button" type="button" onClick={cancelLabel}>Cancel</button>
+          </form>
+        )}
       </div>
     </>
   );
@@ -484,6 +792,18 @@ export default function Home() {
   const [clientId, setClientId] = useState("");
   const clientIdRef = useRef("");
   const [roomId, setRoomId] = useState<string | null>(null);
+  const [projectLibrary, setProjectLibrary] = useState<ProjectLibrary | null>(null);
+  const [storageMode, setStorageMode] = useState<ProjectStorageMode>("indexeddb");
+  const [projectLoading, setProjectLoading] = useState(true);
+  const [projectReady, setProjectReady] = useState(false);
+  const [projectMessage, setProjectMessage] = useState("");
+  const [projectError, setProjectError] = useState("");
+  const [localSaveStatus, setLocalSaveStatus] = useState<"saving" | "saved" | "error">("saved");
+  const activeProjectIdRef = useRef<string | null>(null);
+  const [renamingProject, setRenamingProject] = useState(false);
+  const [projectNameDraft, setProjectNameDraft] = useState("");
+  const projectFileInputRef = useRef<HTMLInputElement>(null);
+  const localProjectDocumentRef = useRef<BoardDocument>(createEmptyBoardDocument());
   const [roomInput, setRoomInput] = useState("");
   const [shareMessage, setShareMessage] = useState("");
   const [result, setResult] = useState<SolveResult | null>(null);
@@ -500,7 +820,7 @@ export default function Home() {
   const [sweepMessage, setSweepMessage] = useState("");
   const [pwaMessage, setPwaMessage] = useState("");
   const [penColor, setPenColor] = useState<BoardPenColor>("navy");
-  const [strokeMode, setStrokeMode] = useState<BoardStrokeMode>("freehand");
+  const [strokeMode, setStrokeMode] = useState<DrawingTool>("freehand");
   const [reportOpen, setReportOpen] = useState(false);
   const [projectTitle, setProjectTitle] = useState("");
   const [reportMessage, setReportMessage] = useState("");
@@ -517,18 +837,86 @@ export default function Home() {
     [boardDocument.knownValues],
   );
   const sync = useBoardSync(roomId, clientId, boardDocument, setBoardDocument);
+  const activeProjectId = projectLibrary?.activeProjectId;
+  const activeProject = projectLibrary?.projects.find((project) => project.id === activeProjectId);
 
   useEffect(() => {
     const id = crypto.randomUUID();
     clientIdRef.current = id;
     setClientId(id);
     const roomFromLink = new URLSearchParams(window.location.hash.slice(1)).get("board");
-    if (roomFromLink && /^[\da-f]{8}-(?:[\da-f]{4}-){3}[\da-f]{12}$/i.test(roomFromLink)) {
-      setRoomId(roomFromLink);
-      const saved = readStoredBoard(roomFromLink);
-      if (saved) setBoardDocument(saved);
-    }
+    let active = true;
+    void loadProjectLibrary().then(({ library, storageMode: mode, warning }) => {
+      if (!active) return;
+      const selected = library.projects.find((project) => project.id === library.activeProjectId) ?? library.projects[0];
+      setProjectLibrary(library);
+      setStorageMode(mode);
+      if (warning) setProjectMessage(warning);
+      activeProjectIdRef.current = selected.id;
+      localProjectDocumentRef.current = selected.document;
+      if (roomFromLink && /^[\da-f]{8}-(?:[\da-f]{4}-){3}[\da-f]{12}$/i.test(roomFromLink)) {
+        setRoomId(roomFromLink);
+        setBoardDocument(readStoredBoard(roomFromLink) ?? createEmptyBoardDocument());
+      } else {
+        setBoardDocument(selected.document);
+      }
+      setProjectLoading(false);
+      setProjectReady(true);
+    }).catch((error: unknown) => {
+      if (!active) return;
+      setProjectError(error instanceof Error ? error.message : "Local projects could not be loaded.");
+      setProjectLoading(false);
+    });
+    return () => { active = false; };
   }, []);
+
+  useEffect(() => {
+    if (!projectReady || roomId || !projectLibrary) return;
+    localProjectDocumentRef.current = boardDocument;
+    setLocalSaveStatus("saving");
+    const timeout = window.setTimeout(() => {
+      void saveLocalProject(storageMode, projectLibrary.activeProjectId, boardDocument)
+        .then((updated) => {
+          if (activeProjectIdRef.current === projectLibrary.activeProjectId) {
+            setProjectLibrary(updated);
+            setLocalSaveStatus("saved");
+            setProjectError("");
+          }
+        })
+        .catch((error: unknown) => {
+          if (activeProjectIdRef.current === projectLibrary.activeProjectId) {
+            setLocalSaveStatus("error");
+            setProjectError(error instanceof Error ? error.message : "The project could not be saved locally.");
+          }
+        });
+    }, 350);
+    return () => window.clearTimeout(timeout);
+  }, [boardDocument, projectLibrary?.activeProjectId, projectReady, roomId, storageMode]);
+
+  useEffect(() => {
+    if (!projectReady || roomId || !projectLibrary) return;
+    const saveBeforeSuspension = () => {
+      void saveLocalProject(storageMode, projectLibrary.activeProjectId, boardDocument)
+        .then((updated) => {
+          if (activeProjectIdRef.current === projectLibrary.activeProjectId) setProjectLibrary(updated);
+        })
+        .catch((error: unknown) => {
+          if (activeProjectIdRef.current === projectLibrary.activeProjectId) {
+            setLocalSaveStatus("error");
+            setProjectError(error instanceof Error ? error.message : "The project could not be saved locally.");
+          }
+        });
+    };
+    const onVisibilityChange = () => {
+      if (window.document.visibilityState === "hidden") saveBeforeSuspension();
+    };
+    window.addEventListener("pagehide", saveBeforeSuspension);
+    window.document.addEventListener("visibilitychange", onVisibilityChange);
+    return () => {
+      window.removeEventListener("pagehide", saveBeforeSuspension);
+      window.document.removeEventListener("visibilitychange", onVisibilityChange);
+    };
+  }, [boardDocument, projectLibrary?.activeProjectId, projectReady, roomId, storageMode]);
 
   useEffect(() => {
     if ("serviceWorker" in navigator && window.isSecureContext) {
@@ -679,7 +1067,159 @@ export default function Home() {
     setBoardDocument((current) => setStroke(current, id, points, deleted, currentClientId, style));
   }, []);
 
-  const activateRoom = (id: string, restore = true) => {
+  const flushLocalProject = async () => {
+    if (!projectReady || !projectLibrary || roomId) return projectLibrary;
+    const updated = await saveLocalProject(storageMode, projectLibrary.activeProjectId, boardDocument);
+    setProjectLibrary(updated);
+    localProjectDocumentRef.current = boardDocument;
+    setLocalSaveStatus("saved");
+    return updated;
+  };
+
+  const activateProject = async (id: string) => {
+    setProjectError("");
+    setProjectMessage("");
+    try {
+      await flushLocalProject();
+      const updated = await activateLocalProject(storageMode, id);
+      const selected = updated.projects.find((project) => project.id === id);
+      if (!selected) throw new Error("That project no longer exists on this device.");
+      activeProjectIdRef.current = selected.id;
+      setProjectLibrary(updated);
+      localProjectDocumentRef.current = selected.document;
+      setBoardDocument(selected.document);
+      setRoomId(null);
+      window.history.replaceState(null, "", `${window.location.pathname}${window.location.search}`);
+    } catch (error) {
+      setProjectError(error instanceof Error ? error.message : "The project could not be opened.");
+    }
+  };
+
+  const createProject = async () => {
+    setProjectError("");
+    setProjectMessage("");
+    try {
+      await flushLocalProject();
+      const name = `Project ${(projectLibrary?.projects.length ?? 0) + 1}`;
+      const updated = await createLocalProject(storageMode, name, createEmptyBoardDocument());
+      const created = updated.projects.find((project) => project.id === updated.activeProjectId);
+      if (!created) throw new Error("The new project could not be opened.");
+      activeProjectIdRef.current = created.id;
+      setProjectLibrary(updated);
+      localProjectDocumentRef.current = created.document;
+      setBoardDocument(created.document);
+      setRoomId(null);
+      setRenamingProject(false);
+      window.history.replaceState(null, "", `${window.location.pathname}${window.location.search}`);
+      setProjectMessage(`Created "${created.name}".`);
+    } catch (error) {
+      setProjectError(error instanceof Error ? error.message : "The project could not be created.");
+    }
+  };
+
+  const renameProject = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (!projectLibrary) return;
+    setProjectError("");
+    try {
+      const updated = await renameLocalProject(storageMode, projectLibrary.activeProjectId, projectNameDraft);
+      setProjectLibrary(updated);
+      setRenamingProject(false);
+      setProjectMessage("Project renamed.");
+    } catch (error) {
+      setProjectError(error instanceof Error ? error.message : "The project could not be renamed.");
+    }
+  };
+
+  const removeProject = async () => {
+    if (!projectLibrary || !activeProject) return;
+    if (!window.confirm(`Delete "${activeProject.name}" from this device? This cannot be undone.`)) return;
+    setProjectError("");
+    try {
+      const updated = await deleteLocalProject(storageMode, activeProject.id);
+      const selected = updated.projects.find((project) => project.id === updated.activeProjectId);
+      if (!selected) throw new Error("A replacement project could not be opened.");
+      activeProjectIdRef.current = selected.id;
+      setProjectLibrary(updated);
+      localProjectDocumentRef.current = selected.document;
+      setBoardDocument(selected.document);
+      setRoomId(null);
+      setRenamingProject(false);
+      window.history.replaceState(null, "", `${window.location.pathname}${window.location.search}`);
+      setProjectMessage("Project deleted from this device.");
+    } catch (error) {
+      setProjectError(error instanceof Error ? error.message : "The project could not be deleted.");
+    }
+  };
+
+  const exportProject = () => {
+    if (!activeProject) return;
+    try {
+      const content = serializeProjectFile(activeProject.name, roomId ? localProjectDocumentRef.current : boardDocument);
+      const blob = new Blob([content], { type: "application/vnd.fbd-whiteboard+json" });
+      const url = URL.createObjectURL(blob);
+      const anchor = window.document.createElement("a");
+      anchor.href = url;
+      anchor.download = `${activeProject.name.replace(/[<>:"/\\|?*\u0000-\u001f]/g, "-").replace(/\s+/g, "-")}.fbdproject`;
+      anchor.click();
+      window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+      setProjectError("");
+      setProjectMessage(`Exported "${activeProject.name}" to a project file.`);
+    } catch (error) {
+      setProjectError(error instanceof Error ? error.message : "The project file could not be exported.");
+    }
+  };
+
+  const importProjectFile = async (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) return;
+    setProjectError("");
+    setProjectMessage("");
+    if (file.size > 5_000_000) {
+      setProjectError("This project file is too large to import (maximum 5 MB).");
+      return;
+    }
+    try {
+      const imported = parseProjectFile(await file.text());
+      await flushLocalProject();
+      const existingNames = new Set((projectLibrary?.projects ?? []).map((project) => project.name.toLowerCase()));
+      let name = imported.project.name;
+      if (existingNames.has(name.toLowerCase())) {
+        let suffix = 1;
+        do {
+          const suffixText = suffix === 1 ? " (imported)" : ` (imported ${suffix})`;
+          name = `${imported.project.name.slice(0, 80 - suffixText.length)}${suffixText}`;
+          suffix += 1;
+        } while (existingNames.has(name.toLowerCase()));
+      }
+      const updated = await createLocalProject(storageMode, name, imported.project.document);
+      const created = updated.projects.find((project) => project.id === updated.activeProjectId);
+      if (!created) throw new Error("The imported project could not be opened.");
+      activeProjectIdRef.current = created.id;
+      setProjectLibrary(updated);
+      localProjectDocumentRef.current = created.document;
+      setBoardDocument(created.document);
+      setRoomId(null);
+      setRenamingProject(false);
+      window.history.replaceState(null, "", `${window.location.pathname}${window.location.search}`);
+      setProjectMessage(`Imported "${created.name}" as a new project. Your existing projects were not replaced.`);
+    } catch (error) {
+      setProjectError(error instanceof Error ? error.message : "The project file could not be imported.");
+    }
+  };
+
+  const activateRoom = async (id: string, restore = true) => {
+    if (!projectReady) {
+      setProjectError("Wait for local project storage to finish loading before opening a shared board.");
+      return;
+    }
+    try {
+      await flushLocalProject();
+    } catch (error) {
+      setProjectError(error instanceof Error ? error.message : "The current local project could not be saved.");
+      return;
+    }
     if (restore) {
       const saved = readStoredBoard(id);
       setBoardDocument(saved ?? createEmptyBoardDocument());
@@ -689,15 +1229,15 @@ export default function Home() {
     window.history.replaceState(null, "", `${window.location.pathname}${window.location.search}#board=${id}`);
   };
 
-  const createBoardLink = () => {
+  const createBoardLink = async () => {
     if (!boardSyncConfigured) {
       setShareMessage("Live sharing is not configured on this deployment yet. Follow the Supabase setup in README.");
       return;
     }
-    activateRoom(crypto.randomUUID(), false);
+    await activateRoom(crypto.randomUUID(), false);
   };
 
-  const joinBoard = () => {
+  const joinBoard = async () => {
     if (!boardSyncConfigured) {
       setShareMessage("Live sharing is not configured on this deployment yet. Follow the Supabase setup in README.");
       return;
@@ -713,7 +1253,7 @@ export default function Home() {
       setShareMessage("Paste a valid FBD Whiteboard share link or board ID.");
       return;
     }
-    activateRoom(candidate);
+    await activateRoom(candidate);
   };
 
   const copyBoardLink = async () => {
@@ -728,6 +1268,7 @@ export default function Home() {
 
   const leaveBoard = () => {
     setRoomId(null);
+    setBoardDocument(localProjectDocumentRef.current);
     setShareMessage("");
     window.history.replaceState(null, "", `${window.location.pathname}${window.location.search}`);
   };
@@ -803,11 +1344,85 @@ export default function Home() {
   return (
     <main className="whiteboard">
       <header className="board-toolbar">
-        <a className="brand" href="/" aria-label="FBD Whiteboard">
-          <span className="brand-mark">F</span>
-          <span>FBD <strong>Whiteboard</strong></span>
-        </a>
+        <div className="brand-group">
+          <a className="brand" href="/" aria-label="FBD Whiteboard">
+            <span className="brand-mark" aria-hidden="true">F</span>
+            <span>FBD <strong>Whiteboard</strong></span>
+          </a>
+          <span className="brand-logo">
+            <img src="/vaderstad-logo.svg" alt="Väderstad" />
+          </span>
+        </div>
         <div className="toolbar-actions">
+          <details className="project-menu">
+            <summary aria-label="Manage local projects">
+              {projectLoading ? "Projects…" : activeProject?.name ?? "Projects"}
+            </summary>
+            <div className="project-popover">
+              <strong>Projects on this device</strong>
+              <p>Projects autosave in this browser and stay separate from shared boards.</p>
+              {projectLibrary && (
+                <>
+                  <label className="project-control-label" htmlFor="active-project">Open project</label>
+                  <select
+                    id="active-project"
+                    className="project-select"
+                    value={projectLibrary.activeProjectId}
+                    onChange={(event) => void activateProject(event.target.value)}
+                    disabled={projectLoading || !projectReady}
+                  >
+                    {projectLibrary.projects.map((project) => (
+                      <option key={project.id} value={project.id}>{project.name}</option>
+                    ))}
+                  </select>
+                </>
+              )}
+              {renamingProject ? (
+                <form className="project-rename-form" onSubmit={(event) => void renameProject(event)}>
+                  <label className="project-control-label" htmlFor="project-name">Project name</label>
+                  <input
+                    id="project-name"
+                    className="project-name-input"
+                    value={projectNameDraft}
+                    maxLength={80}
+                    onChange={(event) => setProjectNameDraft(event.target.value)}
+                    autoFocus
+                    required
+                  />
+                  <div className="project-buttons">
+                    <button className="secondary-button" type="submit">Save name</button>
+                    <button className="quiet-button" type="button" onClick={() => setRenamingProject(false)}>Cancel</button>
+                  </div>
+                </form>
+              ) : (
+                <div className="project-buttons">
+                  <button className="secondary-button" type="button" onClick={() => void createProject()} disabled={projectLoading || !projectReady}>New project</button>
+                  <button className="quiet-button" type="button" disabled={!projectReady || !activeProject} onClick={() => {
+                    if (!activeProject) return;
+                    setProjectNameDraft(activeProject.name);
+                    setRenamingProject(true);
+                  }}>Rename</button>
+                  <button className="quiet-button project-delete-button" type="button" disabled={!projectReady || !activeProject} onClick={() => void removeProject()}>Delete</button>
+                </div>
+              )}
+              <div className="project-buttons project-file-actions">
+                <button className="secondary-button" type="button" onClick={exportProject} disabled={!projectReady || !activeProject}>Export project</button>
+                <button className="quiet-button" type="button" disabled={projectLoading || !projectReady} onClick={() => projectFileInputRef.current?.click()}>Import project</button>
+                <input
+                  ref={projectFileInputRef}
+                  className="sr-only"
+                  type="file"
+                  accept=".fbdproject,.json,application/json"
+                  aria-label="Choose an FBD project file to import"
+                  onChange={(event) => void importProjectFile(event)}
+                />
+              </div>
+              <p className="project-save-status" role="status" aria-live="polite">
+                {projectLoading ? "Loading saved projects…" : !projectReady ? "Local project storage is unavailable." : roomId ? "Shared board; this local project is unchanged." : localSaveStatus === "saving" ? "Saving on this device…" : localSaveStatus === "error" ? "Local save failed." : storageMode === "indexeddb" ? "Saved on this device." : "Saved in browser storage."}
+              </p>
+              {projectMessage && <p className="project-message" role="status">{projectMessage}</p>}
+            </div>
+          </details>
           <button className="report-button" type="button" onClick={() => { setReportMessage(""); setReportOpen(true); }}>PDF report</button>
           <span className={`local-indicator sync-indicator sync-${sync.status}`} aria-live="polite">
             <span />{sync.status === "connected" ? sync.deviceCount > 1 ? `${sync.deviceCount} devices` : "Sync ready" : sync.status === "connecting" ? "Connecting" : sync.status === "error" ? "Sync issue" : "Local"}
@@ -831,10 +1446,10 @@ export default function Home() {
                 <>
                   <p>Generate a private link, then open it on your other device.</p>
                   {boardSyncConfigured && <p>Sharing sends equations, known values, and sketch strokes to Supabase.</p>}
-                  <button type="button" className="secondary-button" disabled={!boardSyncConfigured} onClick={createBoardLink}>Create share link</button>
+                  <button type="button" className="secondary-button" disabled={!boardSyncConfigured || !projectReady} onClick={createBoardLink}>Create share link</button>
                   <label className="share-link-label" htmlFor="join-board">Or join a board</label>
                   <input id="join-board" className="share-link-input" value={roomInput} onChange={(event) => setRoomInput(event.target.value)} placeholder="Paste link or board ID" />
-                  <button type="button" className="quiet-button" disabled={!boardSyncConfigured} onClick={joinBoard}>Join board</button>
+                  <button type="button" className="quiet-button" disabled={!boardSyncConfigured || !projectReady} onClick={joinBoard}>Join board</button>
                 </>
               )}
               {(shareMessage || sync.error) && <p className={sync.error ? "share-error" : "share-message"} role={sync.error ? "alert" : "status"}>{sync.error || shareMessage}</p>}
@@ -845,6 +1460,7 @@ export default function Home() {
             <div className="help-popover">
               <strong>Apple Pencil</strong>
               <p>Turn on Scribble in Settings → Apple Pencil. Write one equation per line, then check the text.</p>
+              <p>This app does not provide cloud Mathpix OCR. On iPad, use the on-device Scribble feature to enter handwriting while offline.</p>
               <strong>Math input</strong>
               <p>Use <code>sqrt(x)</code>, <code>abs(x)</code>, or <code>|x|</code>. Trig functions use degrees. Length values assume inches; keep units consistent.</p>
             </div>
@@ -852,9 +1468,14 @@ export default function Home() {
         </div>
       </header>
 
-      {pwaMessage && <p className="pwa-warning" role="status">{pwaMessage}</p>}
+      {(pwaMessage || projectError) && (
+        <p className={`pwa-warning ${projectError ? "project-error-warning" : ""}`} role={projectError ? "alert" : "status"}>
+          {projectError || pwaMessage}
+        </p>
+      )}
+      {projectLoading && <div className="project-loading" role="status">Opening projects saved on this device…</div>}
 
-      <div className="board-split">
+      <div className={`board-split ${projectLoading ? "projects-loading" : ""}`} aria-busy={projectLoading}>
         <section className="board-pane sketch-pane" aria-label="Free body diagram">
           <DrawingPad
             label="Free body diagram sketch pad"

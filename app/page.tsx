@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useId, useMemo, useRef, useState, type FormEvent, type PointerEvent, type Ref, type RefObject } from "react";
+import { useCallback, useEffect, useId, useMemo, useRef, useState, type ChangeEvent, type FormEvent, type PointerEvent, type Ref, type RefObject } from "react";
 import { extractVariables, LinearEquation, MathInputError, parseEquations, solveSystem, SolveResult } from "../lib/math";
 import {
   BoardDocument,
@@ -19,6 +19,18 @@ import {
 import { boardSyncConfigured, readStoredBoard, useBoardSync } from "../lib/use-board-sync";
 import { calculateVariables } from "../lib/calculated-variables";
 import { validateAxisRange } from "../lib/plot-range";
+import {
+  activateLocalProject,
+  createLocalProject,
+  deleteLocalProject,
+  loadProjectLibrary,
+  parseProjectFile,
+  ProjectLibrary,
+  ProjectStorageMode,
+  renameLocalProject,
+  saveLocalProject,
+  serializeProjectFile,
+} from "../lib/project-storage";
 
 type Point = BoardPoint;
 type Sample = { driver: number; response: number };
@@ -780,6 +792,18 @@ export default function Home() {
   const [clientId, setClientId] = useState("");
   const clientIdRef = useRef("");
   const [roomId, setRoomId] = useState<string | null>(null);
+  const [projectLibrary, setProjectLibrary] = useState<ProjectLibrary | null>(null);
+  const [storageMode, setStorageMode] = useState<ProjectStorageMode>("indexeddb");
+  const [projectLoading, setProjectLoading] = useState(true);
+  const [projectReady, setProjectReady] = useState(false);
+  const [projectMessage, setProjectMessage] = useState("");
+  const [projectError, setProjectError] = useState("");
+  const [localSaveStatus, setLocalSaveStatus] = useState<"saving" | "saved" | "error">("saved");
+  const activeProjectIdRef = useRef<string | null>(null);
+  const [renamingProject, setRenamingProject] = useState(false);
+  const [projectNameDraft, setProjectNameDraft] = useState("");
+  const projectFileInputRef = useRef<HTMLInputElement>(null);
+  const localProjectDocumentRef = useRef<BoardDocument>(createEmptyBoardDocument());
   const [roomInput, setRoomInput] = useState("");
   const [shareMessage, setShareMessage] = useState("");
   const [result, setResult] = useState<SolveResult | null>(null);
@@ -813,18 +837,86 @@ export default function Home() {
     [boardDocument.knownValues],
   );
   const sync = useBoardSync(roomId, clientId, boardDocument, setBoardDocument);
+  const activeProjectId = projectLibrary?.activeProjectId;
+  const activeProject = projectLibrary?.projects.find((project) => project.id === activeProjectId);
 
   useEffect(() => {
     const id = crypto.randomUUID();
     clientIdRef.current = id;
     setClientId(id);
     const roomFromLink = new URLSearchParams(window.location.hash.slice(1)).get("board");
-    if (roomFromLink && /^[\da-f]{8}-(?:[\da-f]{4}-){3}[\da-f]{12}$/i.test(roomFromLink)) {
-      setRoomId(roomFromLink);
-      const saved = readStoredBoard(roomFromLink);
-      if (saved) setBoardDocument(saved);
-    }
+    let active = true;
+    void loadProjectLibrary().then(({ library, storageMode: mode, warning }) => {
+      if (!active) return;
+      const selected = library.projects.find((project) => project.id === library.activeProjectId) ?? library.projects[0];
+      setProjectLibrary(library);
+      setStorageMode(mode);
+      if (warning) setProjectMessage(warning);
+      activeProjectIdRef.current = selected.id;
+      localProjectDocumentRef.current = selected.document;
+      if (roomFromLink && /^[\da-f]{8}-(?:[\da-f]{4}-){3}[\da-f]{12}$/i.test(roomFromLink)) {
+        setRoomId(roomFromLink);
+        setBoardDocument(readStoredBoard(roomFromLink) ?? createEmptyBoardDocument());
+      } else {
+        setBoardDocument(selected.document);
+      }
+      setProjectLoading(false);
+      setProjectReady(true);
+    }).catch((error: unknown) => {
+      if (!active) return;
+      setProjectError(error instanceof Error ? error.message : "Local projects could not be loaded.");
+      setProjectLoading(false);
+    });
+    return () => { active = false; };
   }, []);
+
+  useEffect(() => {
+    if (!projectReady || roomId || !projectLibrary) return;
+    localProjectDocumentRef.current = boardDocument;
+    setLocalSaveStatus("saving");
+    const timeout = window.setTimeout(() => {
+      void saveLocalProject(storageMode, projectLibrary.activeProjectId, boardDocument)
+        .then((updated) => {
+          if (activeProjectIdRef.current === projectLibrary.activeProjectId) {
+            setProjectLibrary(updated);
+            setLocalSaveStatus("saved");
+            setProjectError("");
+          }
+        })
+        .catch((error: unknown) => {
+          if (activeProjectIdRef.current === projectLibrary.activeProjectId) {
+            setLocalSaveStatus("error");
+            setProjectError(error instanceof Error ? error.message : "The project could not be saved locally.");
+          }
+        });
+    }, 350);
+    return () => window.clearTimeout(timeout);
+  }, [boardDocument, projectLibrary?.activeProjectId, projectReady, roomId, storageMode]);
+
+  useEffect(() => {
+    if (!projectReady || roomId || !projectLibrary) return;
+    const saveBeforeSuspension = () => {
+      void saveLocalProject(storageMode, projectLibrary.activeProjectId, boardDocument)
+        .then((updated) => {
+          if (activeProjectIdRef.current === projectLibrary.activeProjectId) setProjectLibrary(updated);
+        })
+        .catch((error: unknown) => {
+          if (activeProjectIdRef.current === projectLibrary.activeProjectId) {
+            setLocalSaveStatus("error");
+            setProjectError(error instanceof Error ? error.message : "The project could not be saved locally.");
+          }
+        });
+    };
+    const onVisibilityChange = () => {
+      if (window.document.visibilityState === "hidden") saveBeforeSuspension();
+    };
+    window.addEventListener("pagehide", saveBeforeSuspension);
+    window.document.addEventListener("visibilitychange", onVisibilityChange);
+    return () => {
+      window.removeEventListener("pagehide", saveBeforeSuspension);
+      window.document.removeEventListener("visibilitychange", onVisibilityChange);
+    };
+  }, [boardDocument, projectLibrary?.activeProjectId, projectReady, roomId, storageMode]);
 
   useEffect(() => {
     if ("serviceWorker" in navigator && window.isSecureContext) {
@@ -975,7 +1067,159 @@ export default function Home() {
     setBoardDocument((current) => setStroke(current, id, points, deleted, currentClientId, style));
   }, []);
 
-  const activateRoom = (id: string, restore = true) => {
+  const flushLocalProject = async () => {
+    if (!projectReady || !projectLibrary || roomId) return projectLibrary;
+    const updated = await saveLocalProject(storageMode, projectLibrary.activeProjectId, boardDocument);
+    setProjectLibrary(updated);
+    localProjectDocumentRef.current = boardDocument;
+    setLocalSaveStatus("saved");
+    return updated;
+  };
+
+  const activateProject = async (id: string) => {
+    setProjectError("");
+    setProjectMessage("");
+    try {
+      await flushLocalProject();
+      const updated = await activateLocalProject(storageMode, id);
+      const selected = updated.projects.find((project) => project.id === id);
+      if (!selected) throw new Error("That project no longer exists on this device.");
+      activeProjectIdRef.current = selected.id;
+      setProjectLibrary(updated);
+      localProjectDocumentRef.current = selected.document;
+      setBoardDocument(selected.document);
+      setRoomId(null);
+      window.history.replaceState(null, "", `${window.location.pathname}${window.location.search}`);
+    } catch (error) {
+      setProjectError(error instanceof Error ? error.message : "The project could not be opened.");
+    }
+  };
+
+  const createProject = async () => {
+    setProjectError("");
+    setProjectMessage("");
+    try {
+      await flushLocalProject();
+      const name = `Project ${(projectLibrary?.projects.length ?? 0) + 1}`;
+      const updated = await createLocalProject(storageMode, name, createEmptyBoardDocument());
+      const created = updated.projects.find((project) => project.id === updated.activeProjectId);
+      if (!created) throw new Error("The new project could not be opened.");
+      activeProjectIdRef.current = created.id;
+      setProjectLibrary(updated);
+      localProjectDocumentRef.current = created.document;
+      setBoardDocument(created.document);
+      setRoomId(null);
+      setRenamingProject(false);
+      window.history.replaceState(null, "", `${window.location.pathname}${window.location.search}`);
+      setProjectMessage(`Created "${created.name}".`);
+    } catch (error) {
+      setProjectError(error instanceof Error ? error.message : "The project could not be created.");
+    }
+  };
+
+  const renameProject = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (!projectLibrary) return;
+    setProjectError("");
+    try {
+      const updated = await renameLocalProject(storageMode, projectLibrary.activeProjectId, projectNameDraft);
+      setProjectLibrary(updated);
+      setRenamingProject(false);
+      setProjectMessage("Project renamed.");
+    } catch (error) {
+      setProjectError(error instanceof Error ? error.message : "The project could not be renamed.");
+    }
+  };
+
+  const removeProject = async () => {
+    if (!projectLibrary || !activeProject) return;
+    if (!window.confirm(`Delete "${activeProject.name}" from this device? This cannot be undone.`)) return;
+    setProjectError("");
+    try {
+      const updated = await deleteLocalProject(storageMode, activeProject.id);
+      const selected = updated.projects.find((project) => project.id === updated.activeProjectId);
+      if (!selected) throw new Error("A replacement project could not be opened.");
+      activeProjectIdRef.current = selected.id;
+      setProjectLibrary(updated);
+      localProjectDocumentRef.current = selected.document;
+      setBoardDocument(selected.document);
+      setRoomId(null);
+      setRenamingProject(false);
+      window.history.replaceState(null, "", `${window.location.pathname}${window.location.search}`);
+      setProjectMessage("Project deleted from this device.");
+    } catch (error) {
+      setProjectError(error instanceof Error ? error.message : "The project could not be deleted.");
+    }
+  };
+
+  const exportProject = () => {
+    if (!activeProject) return;
+    try {
+      const content = serializeProjectFile(activeProject.name, roomId ? localProjectDocumentRef.current : boardDocument);
+      const blob = new Blob([content], { type: "application/vnd.fbd-whiteboard+json" });
+      const url = URL.createObjectURL(blob);
+      const anchor = window.document.createElement("a");
+      anchor.href = url;
+      anchor.download = `${activeProject.name.replace(/[<>:"/\\|?*\u0000-\u001f]/g, "-").replace(/\s+/g, "-")}.fbdproject`;
+      anchor.click();
+      window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+      setProjectError("");
+      setProjectMessage(`Exported "${activeProject.name}" to a project file.`);
+    } catch (error) {
+      setProjectError(error instanceof Error ? error.message : "The project file could not be exported.");
+    }
+  };
+
+  const importProjectFile = async (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) return;
+    setProjectError("");
+    setProjectMessage("");
+    if (file.size > 5_000_000) {
+      setProjectError("This project file is too large to import (maximum 5 MB).");
+      return;
+    }
+    try {
+      const imported = parseProjectFile(await file.text());
+      await flushLocalProject();
+      const existingNames = new Set((projectLibrary?.projects ?? []).map((project) => project.name.toLowerCase()));
+      let name = imported.project.name;
+      if (existingNames.has(name.toLowerCase())) {
+        let suffix = 1;
+        do {
+          const suffixText = suffix === 1 ? " (imported)" : ` (imported ${suffix})`;
+          name = `${imported.project.name.slice(0, 80 - suffixText.length)}${suffixText}`;
+          suffix += 1;
+        } while (existingNames.has(name.toLowerCase()));
+      }
+      const updated = await createLocalProject(storageMode, name, imported.project.document);
+      const created = updated.projects.find((project) => project.id === updated.activeProjectId);
+      if (!created) throw new Error("The imported project could not be opened.");
+      activeProjectIdRef.current = created.id;
+      setProjectLibrary(updated);
+      localProjectDocumentRef.current = created.document;
+      setBoardDocument(created.document);
+      setRoomId(null);
+      setRenamingProject(false);
+      window.history.replaceState(null, "", `${window.location.pathname}${window.location.search}`);
+      setProjectMessage(`Imported "${created.name}" as a new project. Your existing projects were not replaced.`);
+    } catch (error) {
+      setProjectError(error instanceof Error ? error.message : "The project file could not be imported.");
+    }
+  };
+
+  const activateRoom = async (id: string, restore = true) => {
+    if (!projectReady) {
+      setProjectError("Wait for local project storage to finish loading before opening a shared board.");
+      return;
+    }
+    try {
+      await flushLocalProject();
+    } catch (error) {
+      setProjectError(error instanceof Error ? error.message : "The current local project could not be saved.");
+      return;
+    }
     if (restore) {
       const saved = readStoredBoard(id);
       setBoardDocument(saved ?? createEmptyBoardDocument());
@@ -985,15 +1229,15 @@ export default function Home() {
     window.history.replaceState(null, "", `${window.location.pathname}${window.location.search}#board=${id}`);
   };
 
-  const createBoardLink = () => {
+  const createBoardLink = async () => {
     if (!boardSyncConfigured) {
       setShareMessage("Live sharing is not configured on this deployment yet. Follow the Supabase setup in README.");
       return;
     }
-    activateRoom(crypto.randomUUID(), false);
+    await activateRoom(crypto.randomUUID(), false);
   };
 
-  const joinBoard = () => {
+  const joinBoard = async () => {
     if (!boardSyncConfigured) {
       setShareMessage("Live sharing is not configured on this deployment yet. Follow the Supabase setup in README.");
       return;
@@ -1009,7 +1253,7 @@ export default function Home() {
       setShareMessage("Paste a valid FBD Whiteboard share link or board ID.");
       return;
     }
-    activateRoom(candidate);
+    await activateRoom(candidate);
   };
 
   const copyBoardLink = async () => {
@@ -1024,6 +1268,7 @@ export default function Home() {
 
   const leaveBoard = () => {
     setRoomId(null);
+    setBoardDocument(localProjectDocumentRef.current);
     setShareMessage("");
     window.history.replaceState(null, "", `${window.location.pathname}${window.location.search}`);
   };
@@ -1109,6 +1354,75 @@ export default function Home() {
           </span>
         </div>
         <div className="toolbar-actions">
+          <details className="project-menu">
+            <summary aria-label="Manage local projects">
+              {projectLoading ? "Projects…" : activeProject?.name ?? "Projects"}
+            </summary>
+            <div className="project-popover">
+              <strong>Projects on this device</strong>
+              <p>Projects autosave in this browser and stay separate from shared boards.</p>
+              {projectLibrary && (
+                <>
+                  <label className="project-control-label" htmlFor="active-project">Open project</label>
+                  <select
+                    id="active-project"
+                    className="project-select"
+                    value={projectLibrary.activeProjectId}
+                    onChange={(event) => void activateProject(event.target.value)}
+                    disabled={projectLoading || !projectReady}
+                  >
+                    {projectLibrary.projects.map((project) => (
+                      <option key={project.id} value={project.id}>{project.name}</option>
+                    ))}
+                  </select>
+                </>
+              )}
+              {renamingProject ? (
+                <form className="project-rename-form" onSubmit={(event) => void renameProject(event)}>
+                  <label className="project-control-label" htmlFor="project-name">Project name</label>
+                  <input
+                    id="project-name"
+                    className="project-name-input"
+                    value={projectNameDraft}
+                    maxLength={80}
+                    onChange={(event) => setProjectNameDraft(event.target.value)}
+                    autoFocus
+                    required
+                  />
+                  <div className="project-buttons">
+                    <button className="secondary-button" type="submit">Save name</button>
+                    <button className="quiet-button" type="button" onClick={() => setRenamingProject(false)}>Cancel</button>
+                  </div>
+                </form>
+              ) : (
+                <div className="project-buttons">
+                  <button className="secondary-button" type="button" onClick={() => void createProject()} disabled={projectLoading || !projectReady}>New project</button>
+                  <button className="quiet-button" type="button" disabled={!projectReady || !activeProject} onClick={() => {
+                    if (!activeProject) return;
+                    setProjectNameDraft(activeProject.name);
+                    setRenamingProject(true);
+                  }}>Rename</button>
+                  <button className="quiet-button project-delete-button" type="button" disabled={!projectReady || !activeProject} onClick={() => void removeProject()}>Delete</button>
+                </div>
+              )}
+              <div className="project-buttons project-file-actions">
+                <button className="secondary-button" type="button" onClick={exportProject} disabled={!projectReady || !activeProject}>Export project</button>
+                <button className="quiet-button" type="button" disabled={projectLoading || !projectReady} onClick={() => projectFileInputRef.current?.click()}>Import project</button>
+                <input
+                  ref={projectFileInputRef}
+                  className="sr-only"
+                  type="file"
+                  accept=".fbdproject,.json,application/json"
+                  aria-label="Choose an FBD project file to import"
+                  onChange={(event) => void importProjectFile(event)}
+                />
+              </div>
+              <p className="project-save-status" role="status" aria-live="polite">
+                {projectLoading ? "Loading saved projects…" : !projectReady ? "Local project storage is unavailable." : roomId ? "Shared board; this local project is unchanged." : localSaveStatus === "saving" ? "Saving on this device…" : localSaveStatus === "error" ? "Local save failed." : storageMode === "indexeddb" ? "Saved on this device." : "Saved in browser storage."}
+              </p>
+              {projectMessage && <p className="project-message" role="status">{projectMessage}</p>}
+            </div>
+          </details>
           <button className="report-button" type="button" onClick={() => { setReportMessage(""); setReportOpen(true); }}>PDF report</button>
           <span className={`local-indicator sync-indicator sync-${sync.status}`} aria-live="polite">
             <span />{sync.status === "connected" ? sync.deviceCount > 1 ? `${sync.deviceCount} devices` : "Sync ready" : sync.status === "connecting" ? "Connecting" : sync.status === "error" ? "Sync issue" : "Local"}
@@ -1132,10 +1446,10 @@ export default function Home() {
                 <>
                   <p>Generate a private link, then open it on your other device.</p>
                   {boardSyncConfigured && <p>Sharing sends equations, known values, and sketch strokes to Supabase.</p>}
-                  <button type="button" className="secondary-button" disabled={!boardSyncConfigured} onClick={createBoardLink}>Create share link</button>
+                  <button type="button" className="secondary-button" disabled={!boardSyncConfigured || !projectReady} onClick={createBoardLink}>Create share link</button>
                   <label className="share-link-label" htmlFor="join-board">Or join a board</label>
                   <input id="join-board" className="share-link-input" value={roomInput} onChange={(event) => setRoomInput(event.target.value)} placeholder="Paste link or board ID" />
-                  <button type="button" className="quiet-button" disabled={!boardSyncConfigured} onClick={joinBoard}>Join board</button>
+                  <button type="button" className="quiet-button" disabled={!boardSyncConfigured || !projectReady} onClick={joinBoard}>Join board</button>
                 </>
               )}
               {(shareMessage || sync.error) && <p className={sync.error ? "share-error" : "share-message"} role={sync.error ? "alert" : "status"}>{sync.error || shareMessage}</p>}
@@ -1146,6 +1460,7 @@ export default function Home() {
             <div className="help-popover">
               <strong>Apple Pencil</strong>
               <p>Turn on Scribble in Settings → Apple Pencil. Write one equation per line, then check the text.</p>
+              <p>This app does not provide cloud Mathpix OCR. On iPad, use the on-device Scribble feature to enter handwriting while offline.</p>
               <strong>Math input</strong>
               <p>Use <code>sqrt(x)</code>, <code>abs(x)</code>, or <code>|x|</code>. Trig functions use degrees. Length values assume inches; keep units consistent.</p>
             </div>
@@ -1153,9 +1468,14 @@ export default function Home() {
         </div>
       </header>
 
-      {pwaMessage && <p className="pwa-warning" role="status">{pwaMessage}</p>}
+      {(pwaMessage || projectError) && (
+        <p className={`pwa-warning ${projectError ? "project-error-warning" : ""}`} role={projectError ? "alert" : "status"}>
+          {projectError || pwaMessage}
+        </p>
+      )}
+      {projectLoading && <div className="project-loading" role="status">Opening projects saved on this device…</div>}
 
-      <div className="board-split">
+      <div className={`board-split ${projectLoading ? "projects-loading" : ""}`} aria-busy={projectLoading}>
         <section className="board-pane sketch-pane" aria-label="Free body diagram">
           <DrawingPad
             label="Free body diagram sketch pad"

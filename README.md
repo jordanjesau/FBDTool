@@ -2,6 +2,14 @@
 
 A standalone, iPad-friendly workspace for free body diagram sketches, equation entry, equation solving, and parameter sweeps. All app features run in the browser; there is no paid OCR, Mathpix account, or API key.
 
+## Local projects and offline use
+
+Choose **Projects** in the top bar to create, reopen, rename, or delete projects on this device. The active project autosaves in browser IndexedDB (with localStorage fallback when IndexedDB is unavailable), including equations, known values, sketch marks, dimensions, and text labels. On first startup, existing locally cached shared boards are copied into the project list as recovered projects; the original cache entries are left untouched. Browser/site-data cleanup can erase local projects, so use **Export project** to keep a backup.
+
+Export creates a versioned `.fbdproject` file that can be stored or moved to another device. **Import project** validates the file and adds it as a new project; it never replaces the current project. A repeated project name is imported with an added suffix. Unsupported file versions, damaged board data, and oversized files are rejected with an error.
+
+After the app has loaded online once and its service worker has cached the app shell, projects can be opened, edited, solved, and exported offline. Local projects stay in this browser and are not uploaded. The separate **Share** feature still synchronizes a shared board through your configured Supabase project when online. This app does not provide cloud Mathpix handwriting OCR; on iPad, use the on-device Scribble feature for handwriting input offline.
+
 ## Run locally
 
 Requirements: Node.js 20.9 or newer and npm.

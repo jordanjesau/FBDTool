@@ -1,4 +1,4 @@
-const CACHE_NAME = "fbd-whiteboard-v2";
+const CACHE_NAME = "fbd-whiteboard-v3";
 const APP_SHELL = ["/", "/manifest.json", "/icon.svg", "/icon-192.png", "/icon-512.png", "/apple-touch-icon.png", "/vaderstad-logo.svg"];
 
 self.addEventListener("install", (event) => {

@@ -10,6 +10,9 @@
   --magenta-soft: #fff8dc;
   --green: #18845b;
   --green-soft: #e9f7f0;
+  --equation-known: #18845b;
+  --equation-calculated: #185adb;
+  --equation-unknown: #bf176e;
   --amber: #82560e;
   --amber-soft: #fff7e7;
   --red: #c2242a;
@@ -145,15 +148,15 @@ button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visib
 .equation-preview { margin: 1px 0 10px; padding: 6px 9px 7px; border: 1px solid #edf0f4; border-radius: 6px; background: #fcfdff; }
 .preview-title { display: flex; justify-content: flex-end; margin-bottom: 3px; color: var(--muted); font-size: 9px; }
 .preview-title > span { display: inline-flex; align-items: center; gap: 4px; }
-.known-key, .calculated-key, .unknown-key { width: 7px; height: 7px; margin-left: 6px; border-radius: 50%; background: var(--green); }
-.calculated-key { background: var(--blue); }
-.unknown-key { background: var(--magenta); }
+.known-key, .calculated-key, .unknown-key { width: 7px; height: 7px; margin-left: 6px; border-radius: 50%; background: var(--equation-known); }
+.calculated-key { background: var(--equation-calculated); }
+.unknown-key { background: var(--equation-unknown); }
 .preview-equation { min-height: 20px; display: flex; align-items: baseline; gap: 7px; }
 .equation-index { width: 12px; color: #8291a5; font-family: "SFMono-Regular", Consolas, monospace; font-size: 9px; text-align: right; }
 .highlighted-equation { color: #344962; font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace; font-size: 11px; overflow-wrap: anywhere; }
-.known-text { color: var(--green); }
-.calculated-text { color: var(--blue); }
-.unknown-text { color: var(--magenta); }
+.known-text { color: var(--equation-known); }
+.calculated-text { color: var(--equation-calculated); }
+.unknown-text { color: var(--equation-unknown); }
 .variable-section { margin: 5px 0 12px; }
 .subsection-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 5px; }
 .subsection-heading h3 { margin: 0; font-size: 11px; font-weight: 650; }
